@@ -75,7 +75,13 @@ class ReplaySource:
             while self._running:
                 next_t = max(next_t + period, time.monotonic())
                 time.sleep(max(0.0, next_t - time.monotonic()))
-                t, gray, ms = self._next()
+                try:
+                    t, gray, ms = self._next()
+                except EOFError:
+                    raise
+                except Exception:  # cv2.error and the like: count it, keep playing
+                    log.exception("replay frame %d failed", self.i - 1)
+                    gray = None
                 if gray is None:
                     self.corrupt += 1
                     continue
@@ -125,9 +131,9 @@ class Stats:
             r = np.array(self.rows)
             temp = cpu_temp_c()
             log.info("%.1f fps | decode %.1f detect %.1f (p95 %.1f) age %.1f (p95 %.1f) ms | tags/frame %.2f | "
-                     "camera frames skipped %d | errors %d%s",
+                     "camera frames skipped %d, corrupt %d | errors %d%s",
                      len(r) / (now - self.t0), np.median(r[:, 0]), np.median(r[:, 1]), np.percentile(r[:, 1], 95),
-                     np.median(r[:, 2]), np.percentile(r[:, 2], 95), r[:, 3].mean(), source.dropped, self.errors,
+                     np.median(r[:, 2]), np.percentile(r[:, 2], 95), r[:, 3].mean(), source.dropped, source.corrupt, self.errors,
                      "" if temp is None else f" | {temp:.0f} C")
             self.t0, self.rows = now, []
 
@@ -157,7 +163,8 @@ def run(cfg: config_mod.Config, replay: str | None = None, seconds: float | None
     localizer = None
     if cfg.field.layout:
         layout = FieldLayout.load(cfg.field.layout)
-        localizer = FieldLocalizer(layout, cfg.tags.size_m, cfg.mount, cfg.field.max_rms_px)
+        localizer = FieldLocalizer(layout, cfg.tags.size_m, cfg.mount, cfg.field.max_rms_px, cfg.field.min_tags,
+                                   corner_noise_px=cfg.field.corner_noise_px, max_xy_std_m=cfg.field.max_xy_std_m)
         log.info("field layout %s: %d tags", cfg.field.layout, len(layout.tags))
     publishers = make_publishers(cfg.output)
     stats = Stats(cfg.output.stats_every_s)
@@ -212,7 +219,11 @@ def run(cfg: config_mod.Config, replay: str | None = None, seconds: float | None
                                             tag_results(tags, cfg.mount, gray.shape[0], cfg.tags.size_m,
                                                         cfg.tags.max_pose_error_px, cfg.tags.ids))
                         if localizer is not None:
-                            frame.field_pose = localizer.solve(tags)
+                            try:  # a failed field pose mustn't cost the frame its tags
+                                frame.field_pose = localizer.solve(tags, gray.shape[0])
+                            except Exception:
+                                stats.errors += 1
+                                frame_error("field pose for frame %d failed", seq, exc_info=True)
                             frame.detect_ms = (time.perf_counter() - t0) * 1e3
                         for p in publishers:
                             p.publish(frame)

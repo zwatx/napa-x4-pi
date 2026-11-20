@@ -44,7 +44,10 @@ class TagsConfig:
 @dataclass
 class FieldConfig:
     layout: str | None = None  # WPILib AprilTag field layout JSON; set it to get a field pose from all tags
-    max_rms_px: float = 3.0  # reject field poses whose tag corners fit worse than this
+    max_rms_px: float = 1.5  # every tag in a field pose must fit within this (pixels); others are left out
+    min_tags: int = 2  # fewer tags give no field pose (one tag's pose is ambiguous: two fits, metres apart)
+    corner_noise_px: float = 0.5  # assumed corner error, for the published expected pose error
+    max_xy_std_m: float = 1.0  # give no field pose when its expected position error is larger
 
 
 @dataclass
@@ -75,7 +78,7 @@ _TYPES = {
                      near_scale=_NUMBER, near_per_frame=(int,), family=(str,), extra=(dict,)),
     "tags": dict(size_m=_NUMBER + (str,), max_pose_error_px=_NUMBER, ids=(list,)),
     "mount": {k: _NUMBER for k in ("x_m", "y_m", "z_m", "roll_deg", "pitch_deg", "yaw_deg")},
-    "field": dict(layout=(str,), max_rms_px=_NUMBER),
+    "field": dict(layout=(str,), max_rms_px=_NUMBER, min_tags=(int,), corner_noise_px=_NUMBER, max_xy_std_m=_NUMBER),
     "output": dict(print=(bool,), udp=(str,), nt_server=(str, int), nt_table=(str,), nt_client_name=(str,),
                    stats_every_s=_NUMBER),
 }

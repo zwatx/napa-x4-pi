@@ -34,7 +34,10 @@ yaw_deg = 0.0                # + turns it left; 0 = picture middle looks along r
 
 [field]
 # layout = "/etc/x4tags-field.json"   # WPILib AprilTag field layout: adds a field pose from all visible tags
-max_rms_px = 3.0
+max_rms_px = 1.5             # every tag in the field pose must fit within this; badly fitting tags are left out
+min_tags = 2                 # one tag alone gives an ambiguous pose (two fits, metres apart): keep this >= 2
+corner_noise_px = 0.5        # assumed corner error, for the expected pose error published with each pose
+max_xy_std_m = 1.0           # no pose when its expected position error is larger than this
 
 [output]
 print = false                # JSON line per frame on stdout

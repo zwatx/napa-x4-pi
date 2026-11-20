@@ -30,6 +30,9 @@ class FieldPose:
     robot_rotation: np.ndarray  # robot axes as columns in field axes (same assumption)
     rms_px: float  # corner direction error, in pixels at the frame's scale
     tag_ids: list[int]
+    xy_std_m: float = float("nan")  # expected position error across the field (largest direction), from the geometry
+    yaw_std_deg: float = float("nan")  # expected heading error
+    covariance: np.ndarray | None = None  # 6x6: field-frame rotation (rad) then camera position (m)
 
     @property
     def robot_rpy_deg(self) -> tuple[float, float, float]:
@@ -38,7 +41,8 @@ class FieldPose:
     def to_dict(self) -> dict:
         roll, pitch, yaw = self.robot_rpy_deg
         return {"robot_xyz_m": np.round(self.robot_position, 4).tolist(), "robot_rpy_deg": [round(roll, 3), round(pitch, 3), round(yaw, 3)],
-                "camera_xyz_m": np.round(self.camera_position, 4).tolist(), "rms_px": round(self.rms_px, 3), "tags": self.tag_ids}
+                "camera_xyz_m": np.round(self.camera_position, 4).tolist(), "rms_px": round(self.rms_px, 3), "tags": self.tag_ids,
+                "xy_std_m": round(self.xy_std_m, 4), "yaw_std_deg": round(self.yaw_std_deg, 3)}
 
 
 def robot_position_from_heading(camera_position: np.ndarray, robot_yaw_rad: float, mount: Mount) -> np.ndarray:
@@ -57,32 +61,71 @@ def _rodrigues(w: np.ndarray) -> np.ndarray:
 
 
 class FieldLocalizer:
-    """``solve(tags)`` -> FieldPose or None, for tags from X4TagDetector.
+    """``solve(tags, frame_height)`` -> FieldPose or None, for tags from X4TagDetector.
 
-    ``max_rms_px``: reject a solution whose corner directions fit worse than this (after dropping the worst tag
-    once, when there are 3 or more). ``frame_height``: of the stitched frame, to express errors in its pixels.
+    ``min_tags``: fewer tags give no pose. One tag's pose has two nearly equally good solutions, metres apart, that
+    its fit error can't tell apart, so the default is 2.
+    ``max_rms_px``: a pose is accepted only if every tag's corners fit within this (pixels of the frame). When some
+    don't, each tag is left out in turn (up to 8 tags) and the best fit without it is kept, if it still has
+    ``min_tags`` tags and all of them fit: one misread or misplaced tag can't pull the pose, or hide in it.
+    ``corner_noise_px``: assumed corner error, for the pose's expected error (``xy_std_m``, ``yaw_std_deg``). A good
+    fit can still be weak, e.g. two small, distant tags in nearly the same direction: these say how much to trust it.
+    ``max_xy_std_m``: give no pose when the expected position error is larger than this.
     """
 
-    def __init__(self, layout: FieldLayout, tag_size_m: float, mount: Mount = Mount(), max_rms_px: float = 3.0,
-                 frame_height: int = 1440, huber_px: float = 1.5):
+    def __init__(self, layout: FieldLayout, tag_size_m: float, mount: Mount = Mount(), max_rms_px: float = 1.5,
+                 min_tags: int = 2, huber_px: float = 1.0, corner_noise_px: float = 0.5, max_xy_std_m: float = 1.0):
         self.layout, self.size, self.mount = layout, float(tag_size_m), mount
-        self.max_rms_px, self.px_per_rad, self.huber = max_rms_px, frame_height / np.pi, huber_px / (frame_height / np.pi)
+        self.max_rms_px, self.min_tags, self.huber_px = float(max_rms_px), max(1, int(min_tags)), float(huber_px)
+        self.corner_noise_px, self.max_xy_std_m = float(corner_noise_px), float(max_xy_std_m)
+        self._set_height(1440)
 
-    def solve(self, tags: list[X4Tag]) -> FieldPose | None:
+    def _set_height(self, frame_height: int) -> None:
+        self.px_per_rad = frame_height / np.pi
+        self.huber = self.huber_px / self.px_per_rad
+
+    def solve(self, tags: list[X4Tag], frame_height: int = 1440) -> FieldPose | None:
+        self._set_height(frame_height)
         tags = [t for t in tags if t.tag_id in self.layout]
-        if not tags:
+        if len(tags) < self.min_tags:
             return None
+        limit = self.max_rms_px / self.px_per_rad
         pose = self._solve(tags)
-        if pose is not None and pose[2] * self.px_per_rad > self.max_rms_px and len(tags) >= 3:
-            worst = int(np.argmax(pose[3]))  # per-tag error: drop the worst tag once and solve again
-            tags = tags[:worst] + tags[worst + 1:]
-            pose = self._solve(tags)
-        if pose is None or pose[2] * self.px_per_rad > self.max_rms_px:
+        if (pose is None or pose[3].max() > limit) and len(tags) > self.min_tags and len(tags) <= 8:
+            best = None  # leave each tag out in turn; keep the best fit in which every remaining tag fits
+            for k in range(len(tags)):
+                rest = tags[:k] + tags[k + 1:]
+                fit = self._solve(rest)
+                if fit is not None and fit[3].max() <= limit and (best is None or fit[2] < best[0][2]):
+                    best = (fit, rest)
+            if best is not None:
+                pose, tags = best
+        if pose is None or pose[3].max() > limit:
             return None
-        r_fc, c, rms, _ = pose
+        r_fc, c, rms, _, jac = pose
+        cov = self._covariance(r_fc, jac)
+        if cov is None:
+            return None
+        xy_std = float(np.sqrt(np.linalg.eigvalsh(cov[3:5, 3:5]).max()))
+        if xy_std > self.max_xy_std_m:
+            return None
         r_rc = self.mount.rotation  # camera axes in robot axes
         r_fr = r_fc @ r_rc.T
-        return FieldPose(c, r_fc, c - r_fr @ self.mount.translation, r_fr, rms * self.px_per_rad, [t.tag_id for t in tags])
+        return FieldPose(c, r_fc, c - r_fr @ self.mount.translation, r_fr, rms * self.px_per_rad, [t.tag_id for t in tags],
+                         xy_std, float(np.degrees(np.sqrt(cov[2, 2]))), cov)
+
+    def _covariance(self, r_fc, jac):
+        """6x6 covariance of (field-frame rotation, camera position) for ``corner_noise_px`` of corner noise, from
+        the fit's Jacobian (rotation updates there are in camera axes: rotated into field axes here)."""
+        sigma = self.corner_noise_px / self.px_per_rad
+        try:
+            cov = np.linalg.inv(jac.T @ jac) * sigma * sigma
+        except np.linalg.LinAlgError:
+            return None
+        t = np.zeros((6, 6))
+        t[:3, :3], t[3:, 3:] = r_fc, np.eye(3)
+        cov = t @ cov @ t.T
+        return cov if np.all(np.isfinite(cov)) else None
 
     # -- internals
     def _solve(self, tags):
@@ -100,13 +143,18 @@ class FieldLocalizer:
         if best is None:
             return None
         r, c, rms, res = best
+        # Every corner must be seen the way the fit says it is, not from behind (a mirror solution can fit the
+        # directions with every one pointing backwards).
+        v = (points - c) @ r
+        if np.min(np.sum(v / np.linalg.norm(v, axis=1, keepdims=True) * rays, 1)) < np.cos(np.radians(5.0)):
+            return None
         per_tag = np.sqrt((res.reshape(len(tags), 4, 2) ** 2).sum(2).mean(1))
-        return r, c, rms, per_tag
+        return r, c, rms, per_tag, self._residuals(r, c, points, rays, bases, jacobian=True)[1]
 
     def _starts(self, tags):
-        """Camera poses from each tag's own pose (largest tags first, which are the most reliable)."""
+        """Camera poses from each tag's own pose (largest tags first, by angle: the most reliable)."""
         out = []
-        for t in sorted(tags, key=lambda t: -np.linalg.norm(t.corners[0] - t.corners[2]))[:2]:
+        for t in sorted(tags, key=lambda t: -float(np.arccos(np.clip(t.rays[0] @ t.rays[2], -1, 1))))[:2]:
             pose = X4TagDetector.pose(t, self.size)
             if pose is None:
                 continue

@@ -57,8 +57,9 @@ class NetworkTablesPublisher(Publisher):
     - ``tags`` (double[]): every tag of a frame packed in one array, ``len(TAG_FIELDS)`` = 7 values per tag:
       id, yaw_deg, pitch_deg, distance_m, x_m, y_m, z_m (robot frame; distance and position NaN without a pose).
       One array, so a reader never mixes one frame's IDs with another frame's bearings.
-    - ``field_pose`` (double[]): with a field layout, the pose from all tags together, 11 values: robot x, y, z (m),
-      roll, pitch, yaw (deg), camera x, y, z (m), rms_px, tag count; empty when there's no solution. The robot
+    - ``field_pose`` (double[]): with a field layout, the pose from all tags together, 13 values: robot x, y, z (m),
+      roll, pitch, yaw (deg), camera x, y, z (m), rms_px, tag count, xy_std_m, yaw_std_deg (the expected position
+      and heading error, for a pose estimator's standard deviations); empty when there's no solution. The robot
       values assume the picture is fixed to the camera body; the camera position holds either way.
     - ``frame`` (int), ``age_ms``, ``decode_ms``, ``detect_ms`` (double), ``camera_connected`` (boolean).
 
@@ -101,7 +102,7 @@ class NetworkTablesPublisher(Publisher):
             self.field_pose.set([], stamp)
         else:
             self.field_pose.set([*map(float, fp.robot_position), *fp.robot_rpy_deg, *map(float, fp.camera_position),
-                                 fp.rms_px, float(len(fp.tag_ids))], stamp)
+                                 fp.rms_px, float(len(fp.tag_ids)), fp.xy_std_m, fp.yaw_std_deg], stamp)
         self.frame.set(frame.seq, stamp)
         self.timings["age_ms"].set((now - frame.capture_time) * 1e3, stamp)
         self.timings["decode_ms"].set(frame.decode_ms, stamp)

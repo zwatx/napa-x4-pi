@@ -72,3 +72,36 @@ def test_unknown_tags_and_no_tags():
     layout = FieldLayout.from_dict(room_layout())
     loc = FieldLocalizer(layout, SIZE)
     assert loc.solve([]) is None
+
+
+def _scene(robot_xy, yaw_deg, mount=Mount(z_m=0.55), seed=0, max_m=4.0):
+    layout = FieldLayout.from_dict(room_layout())
+    r_fr = rotation_rpy(0, 0, math.radians(yaw_deg))
+    p_r = np.array([*robot_xy, 0.0])
+    img = render_from(layout, r_fr @ mount.rotation, p_r + r_fr @ mount.translation, max_m=max_m, seed=seed)
+    return layout, mount, p_r, X4TagDetector().detect(img)
+
+
+def test_one_tag_alone_gives_no_field_pose():
+    layout, mount, p_r, tags = _scene((2.4, 1.7), 30.0)
+    assert FieldLocalizer(layout, SIZE, mount).solve(tags[:1]) is None  # ambiguous: two fits, metres apart
+    assert FieldLocalizer(layout, SIZE, mount, min_tags=1).solve(tags[:1]) is not None  # if you insist
+
+
+def test_a_misread_tag_never_yields_a_wrong_pose():
+    """One tag reported with another layout tag's ID: the pose either leaves it out or isn't given."""
+    import dataclasses
+
+    rng = np.random.default_rng(1)
+    for k in range(8):
+        xy, yaw = (rng.uniform(1.0, 5.0), rng.uniform(1.0, 3.0)), rng.uniform(-180, 180)
+        layout, mount, p_r, tags = _scene(xy, yaw, seed=k)
+        tags = sorted(tags, key=lambda t: t.tag_id)[:3]
+        if len(tags) < 3:
+            continue
+        others = [i for i in layout.tags if i not in {t.tag_id for t in tags}]
+        bad = dataclasses.replace(tags[1], tag_id=int(rng.choice(others)))
+        pose = FieldLocalizer(layout, SIZE, mount).solve([tags[0], bad, tags[2]])
+        if pose is not None:
+            assert bad.tag_id not in pose.tag_ids
+            assert np.linalg.norm(pose.robot_position - p_r) < 0.05
