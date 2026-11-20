@@ -1,0 +1,20 @@
+# Template: deploy/install.sh fills in @USER@ and @REPO@ and installs it as /etc/systemd/system/x4tags.service.
+[Unit]
+Description=x4tags: AprilTags from an Insta360 X4 360-degree webcam stream
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=@USER@
+SupplementaryGroups=video
+WorkingDirectory=@REPO@
+ExecStart=@REPO@/.venv/bin/x4tags --config /etc/x4tags.toml
+Restart=always
+RestartSec=2
+Environment=PYTHONUNBUFFERED=1
+# Keep NumPy/OpenCV from spawning their own thread pools; NAPA's threads come from [detector] threads.
+Environment=OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target
