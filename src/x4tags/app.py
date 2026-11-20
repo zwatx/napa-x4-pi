@@ -12,13 +12,14 @@ import glob
 import logging
 import os
 import signal
+import threading
 import time
 
 import cv2
 import numpy as np
 
 from . import config as config_mod
-from .capture import X4Webcam
+from .capture import NewestFrame, X4Webcam
 from .detector import X4TagDetector
 from .publish import make_publishers
 from .results import FrameResult, tag_results
@@ -27,8 +28,10 @@ log = logging.getLogger("x4tags")
 
 
 class ReplaySource:
-    """Frames from a file of concatenated JPEGs (an MJPEG capture) or a folder of images, at ``fps`` (0: as fast as
-    possible), looping if asked. Same read() contract as X4Webcam."""
+    """Frames from a file of concatenated JPEGs (an MJPEG capture) or a folder of images; same read() contract as
+    X4Webcam. Paced at ``fps``, it behaves like the camera: a thread delivers and decodes frames on time whether or
+    not they're collected (uncollected ones are dropped). With fps 0 it hands over every frame, in order, as fast as
+    they're asked for."""
 
     def __init__(self, path: str, fps: float = 30.0, loop: bool = False, reduce: int = 1):
         self.flag = {1: cv2.IMREAD_GRAYSCALE, 2: cv2.IMREAD_REDUCED_GRAYSCALE_2, 4: cv2.IMREAD_REDUCED_GRAYSCALE_4}[reduce]
@@ -39,30 +42,58 @@ class ReplaySource:
             self.buffers = list(_split_jpegs(open(path, "rb").read()))
         if not self.buffers:
             raise ValueError(f"no frames in {path}")
-        self.period = 1.0 / fps if fps > 0 else 0.0
-        self.loop, self.i, self.next_t = loop, 0, time.monotonic()
-        self.device, self.size, self.dropped, self.last_decode_ms = path, None, 0, 0.0
+        self.loop, self.i = loop, 0
+        self.device, self.size, self.last_decode_ms, self.corrupt = path, None, 0.0, 0
+        self._frames = None
+        if fps > 0:
+            self._frames, self._running = NewestFrame(), True
+            self._thread = threading.Thread(target=self._play, args=(1.0 / fps,), name="replay", daemon=True)
+            self._thread.start()
 
-    def read(self, timeout: float = 1.0):
+    @property
+    def dropped(self) -> int:
+        return self._frames.dropped if self._frames else 0
+
+    def _next(self):
+        """(arrival time, grey or None if it doesn't decode, decode ms) of the next frame; EOFError at the end."""
         if self.i >= len(self.buffers):
             if not self.loop:
                 raise EOFError
             self.i = 0
-        if self.period:
-            self.next_t = max(self.next_t + self.period, time.monotonic())
-            time.sleep(max(0.0, self.next_t - time.monotonic()))
-        t = time.monotonic()
         buf = self.buffers[self.i]
         self.i += 1
+        t = time.monotonic()
         t0 = time.perf_counter()
         gray = cv2.imdecode(buf, self.flag)
-        self.last_decode_ms = (time.perf_counter() - t0) * 1e3
+        return t, gray, (time.perf_counter() - t0) * 1e3
+
+    def _play(self, period):
+        next_t = time.monotonic()
+        try:
+            while self._running:
+                next_t = max(next_t + period, time.monotonic())
+                time.sleep(max(0.0, next_t - time.monotonic()))
+                t, gray, ms = self._next()
+                if gray is None:
+                    self.corrupt += 1
+                    continue
+                self._frames.put(t, gray, ms)
+        except EOFError:
+            self._frames.finish()
+
+    def read(self, timeout: float = 1.0):
+        if self._frames is not None:
+            t, gray, self.last_decode_ms = self._frames.get(timeout, self.device)
+            return t, gray
+        t, gray, self.last_decode_ms = self._next()
         if gray is None:
             raise ValueError(f"frame {self.i - 1} of {self.device} doesn't decode")
         return t, gray
 
     def close(self):
-        pass
+        if self._frames is not None:
+            self._running = False
+            self._thread.join(timeout=2)
 
 
 def _split_jpegs(data: bytes):
@@ -118,7 +149,8 @@ class RateLimitedLog:
 def run(cfg: config_mod.Config, replay: str | None = None, seconds: float | None = None, loop: bool = False) -> int:
     cv2.setNumThreads(1)  # OpenCV's own pool would compete with NAPA's threads and the grab thread
     det_cfg = cfg.detector
-    detector = X4TagDetector(refine_bow_px=det_cfg.refine_bow_px, seam_px=det_cfg.seam_px, min_tag_px=det_cfg.min_tag_px,
+    detector = X4TagDetector(refine_bow_px=det_cfg.refine_bow_px, seam_px=det_cfg.seam_px, near_scale=det_cfg.near_scale,
+                             near_per_frame=det_cfg.near_per_frame, min_tag_px=det_cfg.min_tag_px,
                              threads=det_cfg.threads, family=det_cfg.family, **det_cfg.extra)
     publishers = make_publishers(cfg.output)
     stats = Stats(cfg.output.stats_every_s)
