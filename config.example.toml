@@ -1,0 +1,37 @@
+# x4tags settings. Copy to /etc/x4tags.toml (the service reads it) and edit. Every key is optional.
+
+[camera]
+# device = "/dev/video0"     # default: find the X4 by its USB vendor ID
+width = 2880
+height = 1440
+fps = 30
+reduce = 1                   # 2 = decode at half size (1440x720): cheaper, halves the range
+reconnect_s = 2.0
+
+[detector]
+min_tag_px = 22              # smallest tag side (pixels) NAPA looks for; 16 finds more far tags, costs time
+threads = 1                  # NAPA threads per frame; 2-4 on a Pi 5 lowers latency
+refine_bow_px = 0.2          # refine tags the 360 frame bends more than this ("none" = never)
+seam_px = 192                # search this far either side of the left/right seam (0 = don't)
+# family = "tag36h11"
+# extra = { recover_shadows = true }   # any other NapaDetector option
+
+[tags]
+size_m = 0.1651              # black-square side (FRC: 6.5 in); "none" = bearings only, no pose
+max_pose_error_px = 4.0
+# ids = [1, 2, 3]            # only report these
+
+[mount]                      # camera on the robot, WPILib robot frame (x forward, y left, z up)
+x_m = 0.0
+y_m = 0.0
+z_m = 0.5
+roll_deg = 0.0
+pitch_deg = 0.0              # + tips the camera's forward view down
+yaw_deg = 0.0                # + turns it left; 0 = picture middle looks along robot +x
+
+[output]
+print = false                # JSON line per frame on stdout
+# udp = "10.12.34.2:5800"    # JSON datagram per frame
+# nt_server = "1234"         # NetworkTables 4: team number, or host ("10.12.34.2", "localhost"[:port])
+nt_table = "x4tags"
+stats_every_s = 10.0
