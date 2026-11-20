@@ -7,6 +7,10 @@
 # Usage: deploy/install.sh               everything
 #        deploy/install.sh --no-service  just the virtual environment (no sudo needed if build tools are present)
 set -euo pipefail
+if [ "$(id -u)" -eq 0 ]; then
+    echo "run this as the user the service should run as (it uses sudo itself where needed), not as root" >&2
+    exit 1
+fi
 cd "$(dirname "$0")/.."
 REPO="$(pwd)"
 
