@@ -1,14 +1,15 @@
 """The X4 in webcam (UVC) mode: MJPEG frames, decoded straight to grey.
 
 OpenCV's usual ``VideoCapture.read()`` decodes every MJPEG frame to colour, and a detector then converts it back to
-grey: about 20 + 5 ms per 2880x1440 frame on a Pi 5. Asking V4L2 for the undecoded JPEG and decoding it as greyscale
-(libjpeg skips the colour planes) takes about 11 ms. A background thread keeps only the newest frame, so a slow
+grey. Asking V4L2 for the undecoded JPEG and decoding it as greyscale (libjpeg skips the colour planes) is about half
+the cost: on a Pi 5, 25 -> 11 ms for a 2880x1440 frame from the X4, 34 -> 18 ms for busier quality-90 test frames. A background thread keeps only the newest frame, so a slow
 consumer always gets the latest picture instead of a growing backlog.
 """
 
 from __future__ import annotations
 
 import glob
+import logging
 import os
 import threading
 import time
@@ -17,6 +18,7 @@ import cv2
 import numpy as np
 
 X4_USB_VENDOR = "2e1a"
+log = logging.getLogger(__name__)
 
 
 def find_x4_device() -> str | None:
@@ -56,11 +58,16 @@ class X4Webcam:
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         cap.set(cv2.CAP_PROP_FPS, fps)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):  # don't sit in a stalled read for OpenCV's default ~10 s
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 1000)
         self.raw = bool(cap.set(cv2.CAP_PROP_CONVERT_RGB, 0))  # hand back the JPEG itself
         if not cap.isOpened():
+            cap.release()
             raise RuntimeError(f"could not open {self.device}")
         self.size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-        self.cap = cap
+        if not self.raw:
+            log.warning("this OpenCV build won't hand back undecoded JPEGs; decoding colour then converting (slower)")
+        self._cap = cap  # owned by the grab thread from here on: VideoCapture isn't thread-safe
         self._cond = threading.Condition()
         self._latest = None  # (sequence, capture time, buffer)
         self._seq = 0
@@ -72,18 +79,21 @@ class X4Webcam:
         self._thread.start()
 
     def _grab(self):
-        while self._running:
-            ok, buf = self.cap.read()
-            t = time.monotonic()
-            if not ok:
-                time.sleep(0.005)
-                continue
-            with self._cond:
-                if self._latest is not None and self._latest[0] > self._taken:
-                    self.dropped += 1  # never collected: the consumer is slower than the camera
-                self._seq += 1
-                self._latest = (self._seq, t, buf)
-                self._cond.notify_all()
+        try:
+            while self._running:
+                ok, buf = self._cap.read()
+                t = time.monotonic()
+                if not ok:
+                    time.sleep(0.005)
+                    continue
+                with self._cond:
+                    if self._latest is not None and self._latest[0] > self._taken:
+                        self.dropped += 1  # never collected: the consumer is slower than the camera
+                    self._seq += 1
+                    self._latest = (self._seq, t, buf)
+                    self._cond.notify_all()
+        finally:
+            self._cap.release()  # only here, so it never happens in the middle of a read
 
     def read(self, timeout: float = 1.0):
         """(capture time from time.monotonic(), grey frame) for the newest frame not yet returned."""
@@ -106,9 +116,12 @@ class X4Webcam:
         return gray
 
     def close(self):
+        """Stop the grab thread; it releases the camera itself as it exits. A read stuck in the driver keeps the
+        device open until it returns, so reopening may fail for a moment (the app retries)."""
         self._running = False
-        self._thread.join(timeout=2)
-        self.cap.release()
+        self._thread.join(timeout=3)
+        if self._thread.is_alive():
+            log.warning("camera read still blocked; the device is released when it returns")
 
     def __enter__(self):
         return self
