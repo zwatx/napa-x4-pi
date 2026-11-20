@@ -39,7 +39,7 @@ def add_tag(img: np.ndarray, tag_id: int, lon_deg: float, lat_deg: float, distan
     d = np.array([math.cos(lat) * math.sin(lon), -math.sin(lat), math.cos(lat) * math.cos(lon)])
     right, down, fwd = tangent_basis(d)
     r = _rot(fwd, math.radians(roll_deg)) @ _rot(right, math.radians(tilt_deg)) @ _rot(down, math.radians(turn_deg))
-    ex, ey = r @ right, r @ down  # tag's own right and down, as printed
+    ex, ey = r @ right, r @ down  # the printed pattern's right and down (it faces the camera before turning)
     n = np.cross(ex, ey)
     centre = d * distance_m
     cell = size_m / 8

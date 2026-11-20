@@ -60,10 +60,10 @@ class Mount:
         return self.rotation @ np.asarray(camera_point, float) + self.translation
 
     def pose(self, rotation_cam: np.ndarray, translation_cam: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """A tag pose from ``X4TagDetector.pose`` (OpenCV tag axes, camera frame) in the robot frame.
+        """A tag pose from ``X4TagDetector.pose`` (camera frame) in the robot frame.
 
-        The rotation's columns are the tag's own OpenCV axes (x right, y down as printed, z into the tag) expressed
-        in robot axes."""
+        The rotation's columns stay the tag's own axes as ``X4TagDetector.pose`` defines them (x towards the printed
+        left, y towards the printed bottom, z out of the face), now in robot axes."""
         return self.rotation @ rotation_cam, self.point(translation_cam)
 
 

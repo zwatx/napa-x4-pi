@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 from napa_vision import NapaDetector
 
-from .equirect import TangentView, angular_radius, pixel_to_ray, ray_to_pixel, side_bow_px, unwrap_near
+from .equirect import TangentView, angular_radius, pixel_to_ray, ray_to_pixel, side_bow_px, tangent_basis, unwrap_near
 
 
 @dataclass
@@ -36,8 +36,21 @@ class X4Tag:
 
     @property
     def center_ray(self) -> np.ndarray:
-        c = self.rays.sum(0)
-        return c / np.linalg.norm(c)
+        """Direction of the tag's true centre: where its diagonals cross, in a flat view of the sphere around the tag
+        (straight lines stay straight there, so this is exact for a flat tag; the mean of the corner rays is not, by
+        up to a degree or so for close, turned tags)."""
+        m = self.rays.sum(0)
+        basis = tangent_basis(m)
+        local = self.rays @ basis.T
+        q = local[:, :2] / local[:, 2:3]
+        d1, d2 = q[2] - q[0], q[3] - q[1]
+        a = np.array([[d1[0], -d2[0]], [d1[1], -d2[1]]])
+        if abs(np.linalg.det(a)) < 1e-12:
+            return m / np.linalg.norm(m)
+        s = np.linalg.solve(a, q[1] - q[0])[0]
+        c = q[0] + s * d1
+        r = np.array([c[0], c[1], 1.0]) @ basis
+        return r / np.linalg.norm(r)
 
     def bearing_deg(self) -> tuple[float, float]:
         """(azimuth right of straight ahead, elevation above the horizon) of the tag's middle, degrees."""
@@ -148,7 +161,10 @@ class X4TagDetector:
         """Tag pose in the camera frame (x right, y down, z forward), from a pinhole view centred on the tag.
 
         Returns (R 3x3, t 3, worst corner reprojection error in pixels at the frame's scale) for the lower-error IPPE
-        solution, or None. Object points are NAPA's/OpenCV's square corners, so R, t mean what they do for a pinhole.
+        solution, or None. t is the tag's centre. R's columns are the tag's axes in the camera frame, with OpenCV's
+        square corners for NAPA's corner order (corner 0 is the printed bottom-right of ``napa_vision.tags.tag_image``):
+        x towards the printed left edge, y towards the printed bottom, z out of the printed face. A tag seen nearly
+        face-on has two close IPPE solutions; the chosen one can be tilted a few degrees the wrong way.
         """
         basis = TangentView(tag.center_ray, 1.0, 1, 2, 1).basis  # rows: right, down, forward
         local = tag.rays @ basis.T

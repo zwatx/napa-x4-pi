@@ -64,3 +64,25 @@ def test_no_tags_no_detections():
 def test_rejects_frames_that_are_not_2_to_1():
     with pytest.raises(ValueError):
         X4TagDetector().detect(np.zeros((1080, 1920), np.uint8))
+
+
+def test_corner_order_and_pose_axes_follow_the_printed_tag():
+    """Corner 0 is the printed bottom-right; pose axes: x to the printed left, y to the printed bottom, z out."""
+    img, truth = frame_with((7, dict(lon_deg=0, lat_deg=0, distance_m=1.0, turn_deg=20)))
+    det = X4TagDetector()
+    tag = by_id(det.detect(img))[7]
+    tl, tr, br, bl = truth[7][0]  # synth's truth order: printed top-left, top-right, bottom-right, bottom-left
+    np.testing.assert_allclose(tag.corners, [br, bl, tl, tr], atol=0.3)
+    rot, t, _ = det.pose(tag, 0.1651)
+    assert rot[:, 0] @ [-1, 0, 0] > 0.9  # printed left = camera's left (tag faces the camera, turned 20 deg)
+    assert rot[:, 1] @ [0, 1, 0] > 0.9  # printed bottom = down
+    assert rot[:, 2] @ (-t / np.linalg.norm(t)) > 0.9  # out of the face, towards the camera
+
+
+def test_centre_ray_is_the_true_centre_for_a_close_turned_tag():
+    img, truth = frame_with((30, dict(lon_deg=25, lat_deg=10, distance_m=0.4, turn_deg=55, tilt_deg=30)))
+    tag = by_id(X4TagDetector().detect(img))[30]
+    centre = truth[30][1] / np.linalg.norm(truth[30][1])
+    mean = tag.rays.sum(0) / np.linalg.norm(tag.rays.sum(0))
+    assert np.degrees(np.arccos(np.clip(tag.center_ray @ centre, -1, 1))) < 0.1
+    assert np.degrees(np.arccos(np.clip(mean @ centre, -1, 1))) > 0.3  # what the corner mean would have been
