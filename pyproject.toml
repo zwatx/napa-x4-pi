@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "napa-x4-pi"
+version = "0.1.0"
+description = "AprilTags from an Insta360 X4's 360-degree webcam stream on a Raspberry Pi, with NAPA"
+readme = "README.md"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = [
+    "napa-vision>=0.6.1",
+    "numpy>=1.24",
+    "opencv-python-headless>=4.8",
+]
+
+[project.optional-dependencies]
+nt = ["pyntcore>=2026.2.2"]
+test = ["pytest>=8"]
+
+[project.scripts]
+x4tags = "x4tags.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
