@@ -32,6 +32,10 @@ roll_deg = 0.0
 pitch_deg = 0.0              # + tips the camera's forward view down
 yaw_deg = 0.0                # + turns it left; 0 = picture middle looks along robot +x
 
+[field]
+# layout = "/etc/x4tags-field.json"   # WPILib AprilTag field layout: adds a field pose from all visible tags
+max_rms_px = 3.0
+
 [output]
 print = false                # JSON line per frame on stdout
 # udp = "10.12.34.2:5800"    # JSON datagram per frame

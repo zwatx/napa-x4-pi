@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .detector import X4Tag, X4TagDetector
+from .localize import FieldPose
 from .mount import Mount, yaw_pitch_deg
 
 
@@ -47,11 +48,15 @@ class FrameResult:
     decode_ms: float
     detect_ms: float
     tags: list[TagResult] = field(default_factory=list)
+    field_pose: FieldPose | None = None
 
     def to_dict(self, now: float) -> dict:
-        return {"seq": self.seq, "age_ms": round((now - self.capture_time) * 1e3, 2), "decode_ms": round(self.decode_ms, 2),
-                "detect_ms": round(self.detect_ms, 2), "size": [self.width, self.height],
-                "tags": [t.to_dict() for t in self.tags]}
+        d = {"seq": self.seq, "age_ms": round((now - self.capture_time) * 1e3, 2), "decode_ms": round(self.decode_ms, 2),
+             "detect_ms": round(self.detect_ms, 2), "size": [self.width, self.height],
+             "tags": [t.to_dict() for t in self.tags]}
+        if self.field_pose is not None:
+            d["field_pose"] = self.field_pose.to_dict()
+        return d
 
 
 def tag_results(tags: list[X4Tag], mount: Mount, frame_height: int, size_m: float | None, max_pose_error_px: float,

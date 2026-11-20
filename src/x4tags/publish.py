@@ -57,6 +57,9 @@ class NetworkTablesPublisher(Publisher):
     - ``tags`` (double[]): every tag of a frame packed in one array, ``len(TAG_FIELDS)`` = 7 values per tag:
       id, yaw_deg, pitch_deg, distance_m, x_m, y_m, z_m (robot frame; distance and position NaN without a pose).
       One array, so a reader never mixes one frame's IDs with another frame's bearings.
+    - ``field_pose`` (double[]): with a field layout, the pose from all tags together, 11 values: robot x, y, z (m),
+      roll, pitch, yaw (deg), camera x, y, z (m), rms_px, tag count; empty when there's no solution. The robot
+      values assume the picture is fixed to the camera body; the camera position holds either way.
     - ``frame`` (int), ``age_ms``, ``decode_ms``, ``detect_ms`` (double), ``camera_connected`` (boolean).
 
     Every value of a frame carries the frame's capture time (``camera.latency_ms`` before it arrived) as its NT
@@ -78,6 +81,7 @@ class NetworkTablesPublisher(Publisher):
             self.inst.setServer(host, port)
         t = self.inst.getTable(table)
         self.tags = t.getDoubleArrayTopic("tags").publish()
+        self.field_pose = t.getDoubleArrayTopic("field_pose").publish()
         self.frame = t.getIntegerTopic("frame").publish()
         self.timings = {k: t.getDoubleTopic(k).publish() for k in ("age_ms", "decode_ms", "detect_ms")}
         self.connected = t.getBooleanTopic("camera_connected").publish()
@@ -92,6 +96,12 @@ class NetworkTablesPublisher(Publisher):
             packed += [float(t.tag_id), t.yaw_deg, t.pitch_deg, nan if t.distance_m is None else t.distance_m,
                        float(pos[0]), float(pos[1]), float(pos[2])]
         self.tags.set(packed, stamp)
+        fp = frame.field_pose
+        if fp is None:
+            self.field_pose.set([], stamp)
+        else:
+            self.field_pose.set([*map(float, fp.robot_position), *fp.robot_rpy_deg, *map(float, fp.camera_position),
+                                 fp.rms_px, float(len(fp.tag_ids))], stamp)
         self.frame.set(frame.seq, stamp)
         self.timings["age_ms"].set((now - frame.capture_time) * 1e3, stamp)
         self.timings["decode_ms"].set(frame.decode_ms, stamp)
@@ -101,7 +111,8 @@ class NetworkTablesPublisher(Publisher):
     def camera_connected(self, connected):
         self.connected.set(connected)
         if not connected:
-            self.tags.set([])  # no stale tags while the camera is away
+            self.tags.set([])  # no stale tags or poses while the camera is away
+            self.field_pose.set([])
         self.inst.flush()
 
     def close(self):

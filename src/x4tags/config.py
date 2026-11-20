@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, fields
+from dataclasses import field as _field  # a section is called `field`
 
 from .mount import Mount
 
@@ -30,7 +31,7 @@ class DetectorConfig:
     near_scale: float = 1 / 3  # straight views for close, strongly bent tags, at this fraction of the resolution; 0: off
     near_per_frame: int = 2  # of the 12 straight views, search this many per frame in rotation (0: all every frame)
     family: str = "tag36h11"
-    extra: dict = field(default_factory=dict)  # any other NapaDetector keyword
+    extra: dict = _field(default_factory=dict)  # any other NapaDetector keyword
 
 
 @dataclass
@@ -38,6 +39,12 @@ class TagsConfig:
     size_m: float | None = 0.1651  # black-square side; None: no pose, bearings only
     max_pose_error_px: float = 4.0  # drop poses whose corners reproject worse than this
     ids: list[int] | None = None  # only report these IDs (None: all)
+
+
+@dataclass
+class FieldConfig:
+    layout: str | None = None  # WPILib AprilTag field layout JSON; set it to get a field pose from all tags
+    max_rms_px: float = 3.0  # reject field poses whose tag corners fit worse than this
 
 
 @dataclass
@@ -52,11 +59,12 @@ class OutputConfig:
 
 @dataclass
 class Config:
-    camera: CameraConfig = field(default_factory=CameraConfig)
-    detector: DetectorConfig = field(default_factory=DetectorConfig)
-    tags: TagsConfig = field(default_factory=TagsConfig)
-    mount: Mount = field(default_factory=Mount)
-    output: OutputConfig = field(default_factory=OutputConfig)
+    camera: CameraConfig = _field(default_factory=CameraConfig)
+    detector: DetectorConfig = _field(default_factory=DetectorConfig)
+    tags: TagsConfig = _field(default_factory=TagsConfig)
+    mount: Mount = _field(default_factory=Mount)
+    field: FieldConfig = _field(default_factory=FieldConfig)
+    output: OutputConfig = _field(default_factory=OutputConfig)
 
 
 _NUMBER = (int, float)
@@ -67,6 +75,7 @@ _TYPES = {
                      near_scale=_NUMBER, near_per_frame=(int,), family=(str,), extra=(dict,)),
     "tags": dict(size_m=_NUMBER + (str,), max_pose_error_px=_NUMBER, ids=(list,)),
     "mount": {k: _NUMBER for k in ("x_m", "y_m", "z_m", "roll_deg", "pitch_deg", "yaw_deg")},
+    "field": dict(layout=(str,), max_rms_px=_NUMBER),
     "output": dict(print=(bool,), udp=(str,), nt_server=(str, int), nt_table=(str,), nt_client_name=(str,),
                    stats_every_s=_NUMBER),
 }
@@ -90,7 +99,7 @@ def load(path: str | None) -> Config:
     with open(path, "rb") as f:
         data = tomllib.load(f)
     sections = {"camera": CameraConfig, "detector": DetectorConfig, "tags": TagsConfig, "mount": Mount,
-                "output": OutputConfig}
+                "field": FieldConfig, "output": OutputConfig}
     unknown = set(data) - set(sections)
     if unknown:
         raise ValueError(f"unknown section(s): {', '.join(sorted(unknown))}")
@@ -106,6 +115,8 @@ def load(path: str | None) -> Config:
                 setattr(obj, key, None)
     if built["camera"].reduce not in (1, 2, 4):
         raise ValueError(f"[camera] reduce = {built['camera'].reduce}: expected 1, 2 or 4")
+    if built["field"].layout is not None and built["tags"].size_m is None:
+        raise ValueError("[field] layout needs [tags] size_m")
     if built["output"].nt_server is not None:
         built["output"].nt_server = str(built["output"].nt_server)  # a bare team number is fine
     return Config(**built)

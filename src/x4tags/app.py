@@ -21,6 +21,8 @@ import numpy as np
 from . import config as config_mod
 from .capture import NewestFrame, X4Webcam
 from .detector import X4TagDetector
+from .field import FieldLayout
+from .localize import FieldLocalizer
 from .publish import make_publishers
 from .results import FrameResult, tag_results
 
@@ -152,6 +154,11 @@ def run(cfg: config_mod.Config, replay: str | None = None, seconds: float | None
     detector = X4TagDetector(refine_bow_px=det_cfg.refine_bow_px, seam_px=det_cfg.seam_px, near_scale=det_cfg.near_scale,
                              near_per_frame=det_cfg.near_per_frame, min_tag_px=det_cfg.min_tag_px,
                              threads=det_cfg.threads, family=det_cfg.family, **det_cfg.extra)
+    localizer = None
+    if cfg.field.layout:
+        layout = FieldLayout.load(cfg.field.layout)
+        localizer = FieldLocalizer(layout, cfg.tags.size_m, cfg.mount, cfg.field.max_rms_px)
+        log.info("field layout %s: %d tags", cfg.field.layout, len(layout.tags))
     publishers = make_publishers(cfg.output)
     stats = Stats(cfg.output.stats_every_s)
     frame_error = RateLimitedLog()
@@ -204,6 +211,9 @@ def run(cfg: config_mod.Config, replay: str | None = None, seconds: float | None
                         frame = FrameResult(seq, t_cap, gray.shape[1], gray.shape[0], source.last_decode_ms, detect_ms,
                                             tag_results(tags, cfg.mount, gray.shape[0], cfg.tags.size_m,
                                                         cfg.tags.max_pose_error_px, cfg.tags.ids))
+                        if localizer is not None:
+                            frame.field_pose = localizer.solve(tags)
+                            frame.detect_ms = (time.perf_counter() - t0) * 1e3
                         for p in publishers:
                             p.publish(frame)
                     except Exception:  # one bad frame must not take the robot's vision down

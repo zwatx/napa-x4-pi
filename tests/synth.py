@@ -34,14 +34,21 @@ def add_tag(img: np.ndarray, tag_id: int, lon_deg: float, lat_deg: float, distan
     """Draw a tag facing the camera (then turned about its vertical axis, tilted about its horizontal one and
     rolled about its normal) whose centre is ``distance_m`` away towards (lon, lat). Returns (truth corners (4, 2),
     centre point in camera coordinates)."""
-    height, width = img.shape
     lon, lat = math.radians(lon_deg), math.radians(lat_deg)
     d = np.array([math.cos(lat) * math.sin(lon), -math.sin(lat), math.cos(lat) * math.cos(lon)])
     right, down, fwd = tangent_basis(d)
     r = _rot(fwd, math.radians(roll_deg)) @ _rot(right, math.radians(tilt_deg)) @ _rot(down, math.radians(turn_deg))
     ex, ey = r @ right, r @ down  # the printed pattern's right and down (it faces the camera before turning)
+    return add_tag_at(img, tag_id, d * distance_m, ex, ey, size_m, ss), d * distance_m
+
+
+def add_tag_at(img: np.ndarray, tag_id: int, centre: np.ndarray, ex: np.ndarray, ey: np.ndarray,
+               size_m: float = 0.1651, ss: int = 4) -> np.ndarray:
+    """Draw a tag whose centre is at ``centre`` (camera coordinates, metres) with the printed pattern's right and
+    down along unit vectors ``ex`` and ``ey``. Returns the truth corners (4, 2): printed TL, TR, BR, BL."""
+    height, width = img.shape
+    centre, ex, ey = (np.asarray(v, float) for v in (centre, ex, ey))
     n = np.cross(ex, ey)
-    centre = d * distance_m
     cell = size_m / 8
     pattern = tag_image(tag_id, cell_px=1, quiet_zone_cells=1).astype(float)  # 10 x 10 cells incl. white margin
     half_out = 5 * cell
@@ -83,7 +90,7 @@ def add_tag(img: np.ndarray, tag_id: int, lon_deg: float, lat_deg: float, distan
     h = 4 * cell
     truth = project(np.array([-h, h, h, -h]), np.array([-h, -h, h, h]))
     truth[:, 0] = unwrap_near(truth[:, 0], cu, width)
-    return truth, centre
+    return truth
 
 
 def to_u8(img: np.ndarray) -> np.ndarray:
