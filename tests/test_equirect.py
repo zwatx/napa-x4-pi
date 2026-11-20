@@ -36,3 +36,11 @@ def test_bow_is_small_on_the_horizon_and_larger_above_it():
     sq = np.array([[-20, -20], [20, -20], [20, 20], [-20, 20]], float)
     assert side_bow_px(sq + [1440, 719.5], W, H) < 0.05  # top and bottom sides are just off the horizon
     assert side_bow_px(sq + [1440, 500], W, H) > 0.15  # 27 degrees up: 0.19 px
+
+
+def test_tangent_bases_match_the_single_version():
+    from x4tags.equirect import tangent_basis, tangent_bases
+
+    rng = np.random.default_rng(2)
+    dirs = np.concatenate([rng.normal(size=(50, 3)), [[0, 1.0, 0], [0, -2.0, 0]]])
+    np.testing.assert_allclose(tangent_bases(dirs), np.stack([tangent_basis(d) for d in dirs]), atol=1e-12)

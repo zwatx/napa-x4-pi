@@ -36,14 +36,25 @@ def unwrap_near(u, ref, width: int):
 
 def tangent_basis(direction) -> np.ndarray:
     """Rows (right, down, forward): a camera looking along ``direction``, kept upright (image down ~ world y)."""
-    f = np.asarray(direction, float)
-    f = f / np.linalg.norm(f)
-    right = np.cross([0.0, 1.0, 0.0], f)
-    if np.linalg.norm(right) < 1e-6:  # looking straight up or down
-        right = np.array([1.0, 0.0, 0.0])
-    right /= np.linalg.norm(right)
-    down = np.cross(f, right)
-    return np.stack([right, down, f])
+    x, y, z = (float(v) for v in direction)
+    n = (x * x + y * y + z * z) ** 0.5
+    x, y, z = x / n, y / n, z / n
+    rx, rz = z, -x  # (0, 1, 0) x f
+    m = (rx * rx + rz * rz) ** 0.5
+    rx, ry, rz = (rx / m, 0.0, rz / m) if m > 1e-6 else (1.0, 0.0, 0.0)  # looking straight up or down
+    return np.array([[rx, ry, rz], [y * rz - z * ry, z * rx - x * rz, x * ry - y * rx], [x, y, z]])
+
+
+def tangent_bases(directions) -> np.ndarray:
+    """``tangent_basis`` for many directions at once: (n, 3, 3), rows (right, down, forward) per direction."""
+    f = np.asarray(directions, float)
+    f = f / np.linalg.norm(f, axis=1, keepdims=True)
+    right = np.stack([f[:, 2], np.zeros(len(f)), -f[:, 0]], 1)  # (0, 1, 0) x f
+    n = np.linalg.norm(right, axis=1, keepdims=True)
+    right = np.where(n < 1e-6, [1.0, 0.0, 0.0], right / np.maximum(n, 1e-12))
+    down = np.stack([f[:, 1] * right[:, 2] - f[:, 2] * right[:, 1], f[:, 2] * right[:, 0] - f[:, 0] * right[:, 2],
+                     f[:, 0] * right[:, 1] - f[:, 1] * right[:, 0]], 1)  # f x right
+    return np.stack([right, down, f], 1)
 
 
 class TangentView:
