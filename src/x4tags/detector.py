@@ -1,0 +1,170 @@
+"""AprilTags in the X4's stitched 360-degree webcam frame, using NAPA as it is (public API only).
+
+The frame is equirectangular, so a tag's straight sides come out curved, more so for big tags and tags away from the
+horizon, and a tag straight behind the camera is cut in two by the left/right edge. This wraps a ``NapaDetector``:
+
+1. NAPA runs on the frame as usual.
+2. A strip made of the frame's right and left edges side by side is searched too, for tags cut by the seam.
+3. Each tag whose sides the frame bends by more than ``refine_bow_px`` is looked at again through a small pinhole
+   view centred on it (where its sides are straight again), and its corners are taken from there.
+
+Results carry corners in the frame's pixels and the direction of each corner, which is what pose and bearing need.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import cv2
+import numpy as np
+from napa_vision import NapaDetector
+
+from .equirect import TangentView, angular_radius, pixel_to_ray, ray_to_pixel, side_bow_px, unwrap_near
+
+
+@dataclass
+class X4Tag:
+    tag_id: int
+    corners: np.ndarray  # (4, 2) frame pixels, NAPA's (OpenCV) corner order; u unwrapped to keep the quad whole
+    rays: np.ndarray  # (4, 3) unit directions of the corners, camera frame (x right, y down, z forward)
+    hamming: int | None
+    decision_margin: float | None
+    bow_px: float  # how far the frame bends this tag's sides, pixels
+    refined: bool  # corners came from the straight-sided view
+    seam: bool  # found in the seam strip
+    extra: dict = field(default_factory=dict)
+
+    @property
+    def center_ray(self) -> np.ndarray:
+        c = self.rays.sum(0)
+        return c / np.linalg.norm(c)
+
+    def bearing_deg(self) -> tuple[float, float]:
+        """(azimuth right of straight ahead, elevation above the horizon) of the tag's middle, degrees."""
+        x, y, z = self.center_ray
+        return float(np.degrees(np.arctan2(x, z))), float(np.degrees(np.arcsin(-y)))
+
+
+class X4TagDetector:
+    """``detect(gray)`` on a stitched X4 frame (2:1). Extra keyword arguments go to ``NapaDetector``.
+
+    ``refine_bow_px``: refine tags whose sides the frame bends by more than this (None: never refine).
+    ``seam_px``: width searched on each side of the left/right seam (0: don't search it); should exceed half the
+    widest tag you need there.
+    """
+
+    def __init__(self, refine_bow_px: float | None = 0.2, seam_px: int = 192, view_margin: float = 1.7,
+                 max_view_px: int = 400, min_view_px: int = 256, **napa_kwargs):
+        self.napa = NapaDetector(**napa_kwargs)
+        self.refine_bow_px, self.seam_px = refine_bow_px, int(seam_px)
+        self.view_margin, self.max_view_px, self.min_view_px = view_margin, int(max_view_px), int(min_view_px)
+
+    def detect(self, gray: np.ndarray) -> list[X4Tag]:
+        height, width = gray.shape[:2]
+        if width != 2 * height:
+            raise ValueError(f"expected a 2:1 equirectangular frame, got {width}x{height}")
+        tags = [self._tag(o, width, height, seam=False) for o in self.napa.detect(gray)]
+        if self.seam_px > 0:
+            tags += self._seam(gray, tags, width, height)
+        if self.refine_bow_px is not None:
+            for t in tags:
+                if t.bow_px > self.refine_bow_px:
+                    self._refine(gray, t, width, height)
+        return tags
+
+    # -- steps
+    def _tag(self, obs, width, height, seam, corners=None):
+        c = np.asarray(obs.corners if corners is None else corners, float).reshape(4, 2).copy()
+        c[:, 0] = unwrap_near(c[:, 0], c[0, 0], width)
+        mid = np.mod(c[:, 0].mean() + 0.5, width) - 0.5  # keep the middle in [-0.5, W - 0.5)
+        c[:, 0] += mid - c[:, 0].mean()
+        rays = pixel_to_ray(c[:, 0], c[:, 1], width, height)
+        return X4Tag(int(obs.tag_id), c, rays, obs.hamming, obs.decision_margin, side_bow_px(c, width, height),
+                     False, seam)
+
+    def _seam(self, gray, found, width, height):
+        s = min(self.seam_px, width // 4)
+        strip = np.ascontiguousarray(np.concatenate([gray[:, width - s:], gray[:, :s]], axis=1))
+        out = []
+        for o in self.napa.detect(strip):
+            c = np.asarray(o.corners, float).reshape(4, 2)
+            if not (c[:, 0].min() < s - 0.5 < c[:, 0].max()):
+                continue  # wholly on one side: the full-frame search has it
+            c = c.copy()
+            c[:, 0] += width - s  # strip column x is frame column x + W - s (mod W)
+            t = self._tag(o, width, height, seam=True, corners=c)
+            if any(f.tag_id == t.tag_id and float(f.center_ray @ t.center_ray) > np.cos(np.radians(1.0)) for f in found):
+                continue
+            out.append(t)
+        return out
+
+    def _refine(self, gray, tag, width, height):
+        centre = tag.rays.sum(0)
+        half_angle = min(np.radians(75.0), angular_radius(tag.rays, centre) * self.view_margin)
+        lat = np.arcsin(np.clip(-centre[1] / np.linalg.norm(centre), -1, 1))
+        if abs(lat) + np.sqrt(2) * half_angle > np.radians(88.0):  # the view would reach over a pole
+            tag.extra["refine"] = "too near a pole"
+            return
+        # The frame's own scale (pixels per radian of latitude), or less for big tags so the view stays under
+        # max_view_px: a big tag keeps plenty of edge pixels at half scale and the view costs a quarter as much.
+        focal = min(height / np.pi, (self.max_view_px - 1) / (2 * np.tan(half_angle)))
+        size = 2 * int(np.ceil(focal * np.tan(half_angle))) + 1
+        view = TangentView(centre, focal, size, width, height)
+        patch = view.render(gray)
+        # NAPA misses some borderline tags in very small images that it finds in the full frame; padding the view
+        # with its own edge pixels to a minimum size brings them back (and costs little).
+        pad = max(0, (self.min_view_px - size + 1) // 2)
+        if pad:
+            patch = cv2.copyMakeBorder(patch, pad, pad, pad, pad, cv2.BORDER_REPLICATE)
+        best, best_d = None, 0.25 * size
+        tag.extra["view_scale"] = round(focal / (height / np.pi), 3)
+        for o in self.napa.detect(patch):
+            if int(o.tag_id) != tag.tag_id:
+                continue
+            d = float(np.linalg.norm(np.asarray(o.corners, float).reshape(4, 2).mean(0) - pad - view.c))
+            if d < best_d:
+                best, best_d = o, d
+        if best is None:
+            tag.extra["refine"] = "not found in view"
+            return
+        pc = np.asarray(best.corners, float).reshape(4, 2) - pad
+        rays = view.view_to_ray(pc)
+        rays /= np.linalg.norm(rays, axis=1, keepdims=True)
+        px = ray_to_pixel(rays, width, height)
+        # Keep the full-frame corner order: match the view's corners to the old ones by direction.
+        order = [int(np.argmax(rays @ r)) for r in tag.rays]
+        if sorted(order) != [0, 1, 2, 3]:
+            tag.extra["refine"] = "corner order mismatch"
+            return
+        px, rays = px[order], rays[order]
+        px[:, 0] = unwrap_near(px[:, 0], tag.corners[:, 0], width)
+        tag.corners, tag.rays, tag.refined = px, rays, True
+        tag.hamming, tag.decision_margin = best.hamming, best.decision_margin
+        tag.extra["view_px"] = size
+
+    # -- pose
+    @staticmethod
+    def pose(tag: X4Tag, tag_size_m: float, frame_height: int = 1440):
+        """Tag pose in the camera frame (x right, y down, z forward), from a pinhole view centred on the tag.
+
+        Returns (R 3x3, t 3, worst corner reprojection error in pixels at the frame's scale) for the lower-error IPPE
+        solution, or None. Object points are NAPA's/OpenCV's square corners, so R, t mean what they do for a pinhole.
+        """
+        basis = TangentView(tag.center_ray, 1.0, 1, 2, 1).basis  # rows: right, down, forward
+        local = tag.rays @ basis.T
+        q = local[:, :2] / local[:, 2:3]
+        half = tag_size_m / 2
+        obj = np.array([[-half, half, 0], [half, half, 0], [half, -half, 0], [-half, -half, 0]], float)
+        n, rvecs, tvecs, errs = cv2.solvePnPGeneric(obj, q, np.eye(3), None, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+        best = None
+        for rv, tv in zip(rvecs, tvecs):
+            if tv[2, 0] <= 0:
+                continue
+            proj, _ = cv2.projectPoints(obj, rv, tv, np.eye(3), None)
+            err = float(np.linalg.norm(proj.reshape(-1, 2) - q, axis=1).max())
+            if best is None or err < best[2]:
+                R_local = cv2.Rodrigues(rv)[0]
+                best = (basis.T @ R_local, basis.T @ tv.ravel(), err)
+        if best is None:
+            return None
+        return best[0], best[1], best[2] * frame_height / np.pi  # normalized units -> pixels at the frame's scale
