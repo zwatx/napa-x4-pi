@@ -126,9 +126,14 @@ class X4Webcam:
                     time.sleep(0.005)
                     continue
                 t0 = time.perf_counter()
-                gray = self.decode(buf)
+                try:
+                    gray = self.decode(buf)
+                except Exception:  # cv2.error on a mangled frame must not end the thread
+                    gray = None
                 if gray is None:
                     self.corrupt += 1
+                    if self.corrupt in (1, 10, 100) or self.corrupt % 1000 == 0:
+                        log.warning("%d corrupt frames from %s so far", self.corrupt, self.device)
                     continue
                 self._frames.put(t, gray, (time.perf_counter() - t0) * 1e3)
         finally:
