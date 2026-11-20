@@ -21,7 +21,9 @@ what the X4's picture needs and the robot plumbing:
 - **Robot frame.** Each tag's yaw and pitch from the robot, and with the tag size its distance and pose, in WPILib's
   robot frame (x forward, y left, z up) through the camera's mount position.
 - **Field pose.** With a WPILib AprilTag field layout, one pose fitted to every visible tag's corners at once. A
-  360-degree camera sees tags all around, which pins its position down far better than any single tag.
+  360-degree camera sees tags all around, which pins its position down far better than any single tag. It needs two
+  or more tags (one tag's pose is ambiguous), leaves out tags that don't fit (a misread ID, say), and comes with its
+  expected position and heading error for a pose estimator.
 - **Outputs.** NetworkTables 4, JSON over UDP, or JSON lines on stdout. NT values are timestamped with when the frame
   was taken (arrival minus a configured camera latency).
 - **Service.** A systemd unit that starts at boot and restarts on failure; the loop reconnects when the camera drops
@@ -87,20 +89,22 @@ X4 plugged into a computer with a screen (any Linux machine with this installed)
 
 1. **Is the picture fixed to the camera body?** Insta360 says the X4 stitches and *stabilizes* its 360-degree webcam
    output in the camera, and that camera settings (stabilization included) can't be changed in webcam mode. If the
-   picture's heading doesn't follow the body exactly, bearings and the robot heading from the field pose are wrong
-   while turning. Positions are not affected: the picture turns about the lens, which doesn't move it.
+   picture's heading doesn't follow the body exactly, bearings, the robot heading from the field pose, and the robot
+   position (which goes through the mount offset with that heading) are wrong while turning. The *camera's*
+   position isn't: the picture turns about the lens, which doesn't move it.
 
    ```sh
-   .venv/bin/python -m x4tags.check_stabilization    # keep a tag in view; turn the camera ~90 degrees when told
+   .venv/bin/python -m x4tags.check_stabilization --tilt   # keep a tag in front; turn, then tilt, when told
    ```
 
-   It reports *body-fixed* (all outputs valid), *smoothed* (lags while turning) or *heading-locked*. If it isn't
-   body-fixed, take heading from the robot's gyro and use `field_pose`'s camera position:
-   `x4tags.localize.robot_position_from_heading` shows the arithmetic.
+   It reports *body-fixed* (all outputs valid), *smoothed* (lags while turning) or *heading-* / *horizon-locked*
+   for the turn and the tilt. If it isn't body-fixed, take heading from the robot's gyro and use `field_pose`'s
+   camera position: `x4tags.localize.robot_position_from_heading` shows the arithmetic. If the horizon is locked,
+   leave `[mount]` pitch and roll at 0.
 
 2. **How late are frames?** Open the page it serves in a browser on the same computer, full screen, and point the X4
-   at the screen; it flips a tag's ID and times how long the change takes to arrive. Put the median in
-   `[camera] latency_ms`.
+   at the screen; it flips a tag's ID and times how long the change takes to arrive. That includes the screen's own
+   delay (typically 17-50 ms), so it's an upper bound. Put the median in `[camera] latency_ms`.
 
    ```sh
    .venv/bin/python -m x4tags.check_latency          # then open http://localhost:8765
@@ -113,7 +117,8 @@ All in `/etc/x4tags.toml`; `config.example.toml` lists every key. The ones to se
 - `[mount]`: where the camera is on the robot and how it's turned (WPILib conventions: + pitch tips the view down,
   + yaw turns it left; zero means the middle of the picture looks along the robot's +x).
 - `[tags] size_m`: black-square side (FRC: 0.1651). Without it you get bearings only.
-- `[field] layout`: a WPILib AprilTag field layout JSON (the season's file from WPILib) for `field_pose`.
+- `[field] layout`: a WPILib AprilTag field layout JSON (the season's file from WPILib) for `field_pose`. Keep
+  `min_tags` at 2 or more: a single tag's pose has two nearly equally good fits, metres apart.
 - `[output] nt_server`: your team number (or a host, or `localhost:5810` for a simulator).
 - `[camera] latency_ms`: from `check_latency`. Timestamps are moved back by this much; at 4 m/s every 100 ms
   unaccounted for is 0.4 m of error.
@@ -127,7 +132,7 @@ NetworkTables 4, table `/x4tags` (rename with `nt_table`):
 | Topic | Type | |
 |---|---|---|
 | `tags` | double[] | 7 values per tag: id, yaw_deg, pitch_deg, distance_m, x_m, y_m, z_m |
-| `field_pose` | double[] | with a layout: robot x, y, z (m), roll, pitch, yaw (deg), camera x, y, z (m), rms_px, tag count; empty when there's no fit |
+| `field_pose` | double[] | with a layout: robot x, y, z (m), roll, pitch, yaw (deg), camera x, y, z (m), rms_px, tag count, xy_std_m, yaw_std_deg; empty when there's no fit |
 | `frame`, `age_ms`, `decode_ms`, `detect_ms` | int, double | per frame |
 | `camera_connected` | boolean | true while frames arrive; `tags` and `field_pose` are emptied when it goes false |
 
@@ -149,8 +154,10 @@ for (int i = 0; i + 7 <= latest.value.length; i += 7) {
 }
 ```
 
-`field_pose` reads the same way (11 values); feed robot x, y and yaw to a pose estimator with `takenSeconds`, with
-a standard deviation that grows with `rms_px` and shrinks with the tag count.
+`field_pose` reads the same way (13 values); feed robot x, y and yaw to a pose estimator with `takenSeconds` and
+standard deviations `xy_std_m` and `yaw_std_deg` (in radians). Those come from the fit's geometry and an assumed
+corner error (`corner_noise_px`): two small, distant tags in nearly the same direction can fit well and still be
+10-20 cm out, and they say so (typical well-spread poses: 2-3 cm).
 
 UDP and stdout carry one JSON object per frame with all of that plus each tag's corners (pixels in the stitched
 frame), full pose rotation (columns: the tag's axes towards its printed left edge, its printed bottom, and out of
