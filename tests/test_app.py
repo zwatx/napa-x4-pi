@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from synth import add_tag, blank, to_u8
 
-from x4tags import app, config
+from x4tags import app, config, publish
 from x4tags.mount import Mount
 from x4tags.publish import StdoutPublisher
 from x4tags.results import FrameResult, TagResult
@@ -59,12 +59,47 @@ def test_networktables(frames_dir):
         port = s.getsockname()[1]
     server.startServer("", "127.0.0.1", 0, port)
     try:
-        sub = server.getTable("x4tags").getIntegerArrayTopic("ids").subscribe([])
+        sub = server.getTable("x4tags").getDoubleArrayTopic("tags").subscribe([], ntcore.PubSubOptions(pollStorage=50))
         cfg = config.load(None)
         cfg.camera.fps = 5
         cfg.output.nt_server = f"localhost:{port}"
         app.run(cfg, replay=str(frames_dir), loop=True, seconds=3.0)
-        values = [v.value for v in sub.readQueue()] or [sub.get()]
-        assert any(list(v) == [5] for v in values) or any(list(v) == [9] for v in values), values
+        packed = [list(v.value) for v in sub.readQueue() if len(v.value)]
+        assert packed, "no tags arrived"
+        stride = len(publish.TAG_FIELDS)
+        assert all(len(v) % stride == 0 for v in packed)
+        assert {int(v[0]) for v in packed} <= {5, 9}
+        d = packed[0][stride - 4]
+        assert d == pytest.approx(1.5, rel=0.03)  # distance_m
     finally:
         ntcore.NetworkTableInstance.destroy(server)
+
+
+def test_bad_frames_do_not_stop_the_service(frames_dir, monkeypatch, tmp_path):
+    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rx.bind(("127.0.0.1", 0))
+    rx.settimeout(5)
+    calls = {"n": 0}
+    real = app.X4TagDetector.detect
+
+    def flaky(self, gray):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("boom")
+        return real(self, gray)
+
+    monkeypatch.setattr(app.X4TagDetector, "detect", flaky)
+    cfg = config.load(None)
+    cfg.camera.fps = 0
+    cfg.output.udp = f"127.0.0.1:{rx.getsockname()[1]}"
+    assert app.run(cfg, replay=str(frames_dir)) == 0
+    seqs = [json.loads(rx.recv(65536))["seq"] for _ in range(2)]
+    assert seqs == [0, 2]  # frame 1 failed, the loop went on
+
+
+def test_wrong_frame_shape_is_reported_not_fatal(tmp_path, caplog):
+    cv2.imwrite(str(tmp_path / "flat.jpg"), np.zeros((1080, 1920), np.uint8))
+    cfg = config.load(None)
+    cfg.camera.fps, cfg.camera.reconnect_s = 0, 0.2
+    assert app.run(cfg, replay=str(tmp_path), seconds=1.0) == 0
+    assert "not the 2:1" in caplog.text

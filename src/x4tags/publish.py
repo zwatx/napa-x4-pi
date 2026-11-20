@@ -33,7 +33,8 @@ class StdoutPublisher(Publisher):
 class UdpPublisher(Publisher):
     def __init__(self, target: str):
         host, port = target.rsplit(":", 1)
-        self.addr = (host, int(port))
+        # Resolve once: a name lookup per frame (mDNS .local names especially) could stall the loop.
+        self.addr = socket.getaddrinfo(host, int(port), socket.AF_INET, socket.SOCK_DGRAM)[0][4]
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     def publish(self, frame):
@@ -47,29 +48,36 @@ class UdpPublisher(Publisher):
         self.sock.close()
 
 
-class NetworkTablesPublisher(Publisher):
-    """Publishes under /<table>/: per-tag arrays in the same order (ids, yaw_deg, pitch_deg, distance_m, x_m, y_m,
-    z_m; NaN where no pose), plus frame, age_ms, decode_ms, detect_ms and camera_connected.
+TAG_FIELDS = ("id", "yaw_deg", "pitch_deg", "distance_m", "x_m", "y_m", "z_m")
 
-    Every value of a frame carries the frame's capture time as its NT timestamp, so robot code can read
-    ``getAtomic().serverTime`` for latency compensation instead of trusting age_ms."""
+
+class NetworkTablesPublisher(Publisher):
+    """Publishes under /<table>/ (default /x4tags/):
+
+    - ``tags`` (double[]): every tag of a frame packed in one array, ``len(TAG_FIELDS)`` = 7 values per tag:
+      id, yaw_deg, pitch_deg, distance_m, x_m, y_m, z_m (robot frame; distance and position NaN without a pose).
+      One array, so a reader never mixes one frame's IDs with another frame's bearings.
+    - ``frame`` (int), ``age_ms``, ``decode_ms``, ``detect_ms`` (double), ``camera_connected`` (boolean).
+
+    Every value of a frame carries the frame's capture time (``camera.latency_ms`` before it arrived) as its NT
+    timestamp, for latency compensation with ``getAtomic().serverTime``. While the camera is away, ``tags`` is empty.
+    """
 
     def __init__(self, server: str, table: str = "x4tags", client_name: str = "x4tags"):
         """``server``: a team number ("1234"), or a host ("10.12.34.2", "localhost"), optionally ":port"."""
         import ntcore  # optional dependency: pip install "napa-x4-pi[nt]"
 
-        self._now = ntcore._now  # NT's local clock, microseconds
+        self._now = ntcore._now  # NT's local clock, microseconds (the time base set(value, time) expects)
         self.inst = ntcore.NetworkTableInstance.create()
         self.inst.startClient4(client_name)
-        host, _, port = server.partition(":")
+        host, _, port = str(server).partition(":")
         port = int(port) if port else 0  # 0: NT4's default port
         if host.isdigit():
             self.inst.setServerTeam(int(host), port)
         else:
             self.inst.setServer(host, port)
         t = self.inst.getTable(table)
-        self.ids = t.getIntegerArrayTopic("ids").publish()
-        self.arrays = {k: t.getDoubleArrayTopic(k).publish() for k in ("yaw_deg", "pitch_deg", "distance_m", "x_m", "y_m", "z_m")}
+        self.tags = t.getDoubleArrayTopic("tags").publish()
         self.frame = t.getIntegerTopic("frame").publish()
         self.timings = {k: t.getDoubleTopic(k).publish() for k in ("age_ms", "decode_ms", "detect_ms")}
         self.connected = t.getBooleanTopic("camera_connected").publish()
@@ -78,18 +86,12 @@ class NetworkTablesPublisher(Publisher):
         nan = float("nan")
         now = time.monotonic()
         stamp = int(self._now() - (now - frame.capture_time) * 1e6)
-        tags = frame.tags
-        self.ids.set([t.tag_id for t in tags], stamp)
-        cols = {
-            "yaw_deg": [t.yaw_deg for t in tags],
-            "pitch_deg": [t.pitch_deg for t in tags],
-            "distance_m": [t.distance_m if t.distance_m is not None else nan for t in tags],
-            "x_m": [float(t.position_m[0]) if t.position_m is not None else nan for t in tags],
-            "y_m": [float(t.position_m[1]) if t.position_m is not None else nan for t in tags],
-            "z_m": [float(t.position_m[2]) if t.position_m is not None else nan for t in tags],
-        }
-        for k, v in cols.items():
-            self.arrays[k].set(v, stamp)
+        packed = []
+        for t in frame.tags:
+            pos = t.position_m if t.position_m is not None else (nan, nan, nan)
+            packed += [float(t.tag_id), t.yaw_deg, t.pitch_deg, nan if t.distance_m is None else t.distance_m,
+                       float(pos[0]), float(pos[1]), float(pos[2])]
+        self.tags.set(packed, stamp)
         self.frame.set(frame.seq, stamp)
         self.timings["age_ms"].set((now - frame.capture_time) * 1e3, stamp)
         self.timings["decode_ms"].set(frame.decode_ms, stamp)
@@ -98,6 +100,8 @@ class NetworkTablesPublisher(Publisher):
 
     def camera_connected(self, connected):
         self.connected.set(connected)
+        if not connected:
+            self.tags.set([])  # no stale tags while the camera is away
         self.inst.flush()
 
     def close(self):
