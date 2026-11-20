@@ -3,7 +3,8 @@
 A browser on this computer shows a big tag whose ID flips every couple of seconds; the page reports each flip once
 it has been drawn. Point the X4 at the screen (the tag a metre or so away is plenty). Each flip's latency is the
 arrival time of the first frame showing the new ID minus the flip time, which also includes the screen's own delay
-(about one refresh, ~17 ms at 60 Hz). Use the median as ``[camera] latency_ms``.
+(the compositor and panel: typically 1-3 refreshes, 17-50 ms at 60 Hz), so treat the result as an upper bound;
+subtract your screen's delay if you know it. Use the median as ``[camera] latency_ms``.
 
     python -m x4tags.check_latency               # then open http://localhost:8765 in a browser here, full screen
 """
@@ -22,18 +23,17 @@ from .capture import X4Webcam
 from .detector import X4TagDetector
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>x4tags latency</title>
-<style>html,body{margin:0;height:100%;background:#fff;display:flex;align-items:center;justify-content:center}
-img{height:90vh;image-rendering:pixelated}</style></head><body><img id="t" src="/tag/A.png">
+<style>html,body{margin:0;height:100%;background:#fff}
+img{position:fixed;inset:0;margin:auto;height:90vh;image-rendering:pixelated}</style></head><body>
+<img id="A" src="/tag/A.png"><img id="B" src="/tag/B.png" style="visibility:hidden">
 <script>
-const ids = ["A", "B"]; let k = 0;
-const pre = ids.map(i => { const im = new Image(); im.src = "/tag/" + i + ".png"; return im; });
-function flip() {
-  k = 1 - k;
-  document.getElementById("t").src = pre[k].src;
-  // two animation frames: the new picture has been handed to the screen before we report it
-  requestAnimationFrame(() => requestAnimationFrame(() => fetch("/flip?to=" + ids[k], {method: "POST"})));
-}
-setInterval(flip, PERIOD_MS);
+// Both pictures are decoded up front and only their visibility is toggled, so a flip shows on the next frame.
+const imgs = [document.getElementById("A"), document.getElementById("B")]; let k = 0;
+Promise.all(imgs.map(im => im.decode())).then(() => setInterval(() => {
+  imgs[k].style.visibility = "hidden"; k = 1 - k; imgs[k].style.visibility = "visible";
+  // two animation frames: the change has been handed to the compositor before it's reported
+  requestAnimationFrame(() => requestAnimationFrame(() => fetch("/flip?to=" + imgs[k].id, {method: "POST"})));
+}, PERIOD_MS));
 </script></body></html>"""
 
 
@@ -98,7 +98,7 @@ def main(argv=None) -> int:
     server = make_server({"A": id_a, "B": id_b}, a.period, a.port, flips)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"open http://localhost:{a.port} in a browser on this computer, full screen, and point the X4 at it")
-    det = X4TagDetector(near_per_frame=0, seam_px=0)
+    det = X4TagDetector(near_scale=0, seam_px=0)  # a big tag in front: no extra searches to slow frames down
     with X4Webcam(a.device) as cam:
         try:
             while len(flips) < a.flips + 1:
@@ -115,7 +115,7 @@ def main(argv=None) -> int:
         return 1
     m = np.array(ms)
     print(f"{len(m)} flips: latency median {np.median(m):.0f} ms, 10-90% {np.percentile(m, 10):.0f}-{np.percentile(m, 90):.0f} ms "
-          f"(includes ~1 screen refresh)")
+          f"(an upper bound: includes the screen's own delay)")
     print(f"set [camera] latency_ms = {np.median(m):.0f}")
     return 0
 
