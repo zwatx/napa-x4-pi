@@ -86,3 +86,20 @@ def test_centre_ray_is_the_true_centre_for_a_close_turned_tag():
     mean = tag.rays.sum(0) / np.linalg.norm(tag.rays.sum(0))
     assert np.degrees(np.arccos(np.clip(tag.center_ray @ centre, -1, 1))) < 0.1
     assert np.degrees(np.arccos(np.clip(mean @ centre, -1, 1))) > 0.3  # what the corner mean would have been
+
+
+@pytest.mark.parametrize("lat,dist,tilt,lon", [(40, 0.35, 0, 30), (50, 0.3, 0, 30), (35, 0.25, 30, 30), (-35, 0.4, 0, -135)])
+def test_close_tag_too_bent_for_the_frame_is_found_in_a_straight_view(lat, dist, tilt, lon):
+    img, truth = frame_with((44, dict(lon_deg=lon, lat_deg=lat, distance_m=dist, tilt_deg=tilt)))
+    assert 44 not in {int(o.tag_id) for o in NapaDetector().detect(img)}  # the frame bends it too much
+    assert 44 not in by_id(X4TagDetector(near_scale=0).detect(img))
+    tag = by_id(X4TagDetector(near_per_frame=0).detect(img))[44]
+    assert tag.near and worst_corner_error(tag.corners, truth[44][0]) < 0.35
+
+
+def test_rotating_near_views_find_a_close_tag_within_a_cycle_then_every_frame():
+    img, truth = frame_with((44, dict(lon_deg=30, lat_deg=40, distance_m=0.35)))
+    det = X4TagDetector(near_per_frame=2)
+    seen = [44 in by_id(det.detect(img)) for _ in range(12)]
+    first = seen.index(True)
+    assert first < 6 and all(seen[first:])  # 12 views / 2 per frame; then its view is searched every frame

@@ -27,6 +27,8 @@ class DetectorConfig:
     threads: int = 1  # NAPA threads per call (Pi 5: 4 saves only ~1 ms; JPEG decode dominates)
     refine_bow_px: float | None = 0.2  # refine tags whose sides the frame bends more than this; None: never
     seam_px: int = 192  # 0: don't search across the left/right seam
+    near_scale: float = 1 / 3  # straight views for close, strongly bent tags, at this fraction of the resolution; 0: off
+    near_per_frame: int = 2  # of the 12 straight views, search this many per frame in rotation (0: all every frame)
     family: str = "tag36h11"
     extra: dict = field(default_factory=dict)  # any other NapaDetector keyword
 
@@ -61,8 +63,8 @@ _NUMBER = (int, float)
 _TYPES = {
     "camera": dict(device=(str,), width=(int,), height=(int,), fps=(int,), reduce=(int,), reconnect_s=_NUMBER,
                    latency_ms=_NUMBER),
-    "detector": dict(min_tag_px=(int,), threads=(int,), refine_bow_px=_NUMBER + (str,), seam_px=(int,), family=(str,),
-                     extra=(dict,)),
+    "detector": dict(min_tag_px=(int,), threads=(int,), refine_bow_px=_NUMBER + (str,), seam_px=(int,),
+                     near_scale=_NUMBER, near_per_frame=(int,), family=(str,), extra=(dict,)),
     "tags": dict(size_m=_NUMBER + (str,), max_pose_error_px=_NUMBER, ids=(list,)),
     "mount": {k: _NUMBER for k in ("x_m", "y_m", "z_m", "roll_deg", "pitch_deg", "yaw_deg")},
     "output": dict(print=(bool,), udp=(str,), nt_server=(str, int), nt_table=(str,), nt_client_name=(str,),

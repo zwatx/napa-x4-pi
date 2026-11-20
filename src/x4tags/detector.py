@@ -22,6 +22,12 @@ from napa_vision import NapaDetector
 from .equirect import TangentView, angular_radius, pixel_to_ray, ray_to_pixel, side_bow_px, tangent_basis, unwrap_near
 
 
+_PHI = (1 + 5 ** 0.5) / 2
+_ICOSAHEDRON = ([(0, a, b * _PHI) for a in (1, -1) for b in (1, -1)]
+                + [(a, b * _PHI, 0) for a in (1, -1) for b in (1, -1)]
+                + [(a * _PHI, 0, b) for a in (1, -1) for b in (1, -1)])
+
+
 @dataclass
 class X4Tag:
     tag_id: int
@@ -32,6 +38,7 @@ class X4Tag:
     bow_px: float  # how far the frame bends this tag's sides, pixels
     refined: bool  # corners came from the straight-sided view
     seam: bool  # found in the seam strip
+    near: bool = False  # found in the low-resolution straight views (close tags the frame bends too much)
     extra: dict = field(default_factory=dict)
 
     @property
@@ -64,13 +71,25 @@ class X4TagDetector:
     ``refine_bow_px``: refine tags whose sides the frame bends by more than this (None: never refine).
     ``seam_px``: width searched on each side of the left/right seam (0: don't search it); should exceed half the
     widest tag you need there.
+    ``near_scale``: also search fixed straight (pinhole) views all around the camera at this fraction of the frame's
+    resolution (0: don't). Close tags come out so bent in the 360-degree frame (sides bowed by 5-40 px) that NAPA
+    can't fit them there; in a straight view their sides are straight again. Low resolution suffices because only
+    big tags need it, and the full-resolution refinement then fixes their corners.
+    ``near_per_frame``: how many of the 12 straight views to search per call (0: all). Searching all of them costs
+    several ms, so a live loop searches a few in rotation plus every view that found a close tag on the previous
+    call: a new close tag is found within 12 / near_per_frame frames, then kept every frame.
     """
 
     def __init__(self, refine_bow_px: float | None = 0.2, seam_px: int = 192, view_margin: float = 1.7,
-                 max_view_px: int = 400, min_view_px: int = 256, **napa_kwargs):
+                 max_view_px: int = 400, min_view_px: int = 256, near_scale: float = 1 / 3, near_per_frame: int = 2,
+                 **napa_kwargs):
         self.napa = NapaDetector(**napa_kwargs)
         self.refine_bow_px, self.seam_px = refine_bow_px, int(seam_px)
         self.view_margin, self.max_view_px, self.min_view_px = view_margin, int(max_view_px), int(min_view_px)
+        self.near_scale, self.near_per_frame = float(near_scale), int(near_per_frame)
+        self._near_views = {}  # (width, height) -> [(TangentView, map1, map2)]
+        self._near_next = 0  # next view in the rotation
+        self._near_hits: set[int] = set()  # views that found a close tag on the previous call
 
     def detect(self, gray: np.ndarray) -> list[X4Tag]:
         height, width = gray.shape[:2]
@@ -79,6 +98,8 @@ class X4TagDetector:
         tags = [self._tag(o, width, height, seam=False) for o in self.napa.detect(gray)]
         if self.seam_px > 0:
             tags += self._seam(gray, tags, width, height)
+        if self.near_scale > 0:
+            tags += self._near(gray, tags, width, height)
         if self.refine_bow_px is not None:
             for t in tags:
                 if t.bow_px > self.refine_bow_px:
@@ -109,6 +130,58 @@ class X4TagDetector:
             if any(f.tag_id == t.tag_id and float(f.center_ray @ t.center_ray) > np.cos(np.radians(1.0)) for f in found):
                 continue
             out.append(t)
+        return out
+
+    # Straight views for close tags, centred on the 12 vertices of an icosahedron: no direction is more than 37.4
+    # degrees from a view's centre, so with views 55 degrees in radius any tag whose corners lie within 17.6 degrees
+    # of its centre (a face-on FRC tag 0.37 m away or farther) fits whole in at least one view. (A cube's 6 faces
+    # leave only 5 degrees of margin towards its corners.)
+    NEAR_DIRECTIONS = _ICOSAHEDRON
+    NEAR_HALF_ANGLE = np.radians(55.0)
+
+    def _views(self, width, height):
+        views = self._near_views.get((width, height))
+        if views is None:
+            focal = height / np.pi * self.near_scale
+            size = 2 * int(np.ceil(focal * np.tan(self.NEAR_HALF_ANGLE))) + 1
+            views = []
+            for d in self.NEAR_DIRECTIONS:
+                view = TangentView(np.array(d), focal, size, width, height)
+                g = np.arange(size, dtype=float)
+                uv = ray_to_pixel(view.view_to_ray(np.stack(np.meshgrid(g, g), -1)), width, height)
+                mx = (np.mod(uv[..., 0] + 0.5, width) - 0.5).astype(np.float32)
+                m1, m2 = cv2.convertMaps(mx, uv[..., 1].astype(np.float32), cv2.CV_16SC2)  # fast fixed-point remap
+                views.append((view, m1, m2))
+            self._near_views[(width, height)] = views
+        return views
+
+    def _near(self, gray, found, width, height):
+        views = self._views(width, height)
+        if self.near_per_frame <= 0 or self.near_per_frame >= len(views):
+            chosen = list(range(len(views)))
+        else:
+            chosen = sorted(self._near_hits)
+            for k in range(self.near_per_frame):
+                i = (self._near_next + k) % len(views)
+                if i not in chosen:
+                    chosen.append(i)
+            self._near_next = (self._near_next + self.near_per_frame) % len(views)
+        out, hits = [], set()
+        known = list(found)
+        for i in chosen:
+            view, m1, m2 = views[i]
+            patch = cv2.remap(gray, m1, m2, cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
+            for o in self.napa.detect(patch):
+                rays = view.view_to_ray(np.asarray(o.corners, float).reshape(4, 2))
+                rays /= np.linalg.norm(rays, axis=1, keepdims=True)
+                t = self._tag(o, width, height, seam=False, corners=ray_to_pixel(rays, width, height))
+                if any(f.tag_id == t.tag_id and float(f.center_ray @ t.center_ray) > np.cos(np.radians(2.0)) for f in known):
+                    continue
+                t.near = True
+                out.append(t)
+                known.append(t)
+                hits.add(i)
+        self._near_hits = hits
         return out
 
     def _refine(self, gray, tag, width, height):

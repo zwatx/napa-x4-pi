@@ -14,6 +14,8 @@ min_tag_px = 22              # smallest tag side (pixels) NAPA looks for; 16 fin
 threads = 1                  # NAPA threads per frame; 4 saves only ~1 ms on a Pi 5 (JPEG decode dominates)
 refine_bow_px = 0.2          # refine tags the 360 frame bends more than this ("none" = never)
 seam_px = 192                # search this far either side of the left/right seam (0 = don't)
+near_scale = 0.3333          # straight low-res views for close tags the 360 frame bends too much (0 = off)
+near_per_frame = 2           # of the 12 straight views, search this many per frame in rotation (0 = all)
 # family = "tag36h11"
 # extra = { recover_shadows = true }   # any other NapaDetector option
 

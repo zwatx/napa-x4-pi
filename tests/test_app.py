@@ -45,7 +45,7 @@ def test_replay_to_udp(frames_dir):
 
 def test_stdout_line(capsys):
     frame = FrameResult(4, time.monotonic(), 2880, 1440, 9.0, 3.0,
-                        [TagResult(1, 10.0, 2.0, np.zeros((4, 2)), False, False, 0, 80.0)])
+                        [TagResult(1, 10.0, 2.0, np.zeros((4, 2)), False, False, False, 0, 80.0)])
     StdoutPublisher().publish(frame)
     line = json.loads(capsys.readouterr().out)
     assert line["seq"] == 4 and line["tags"][0]["id"] == 1 and "distance_m" not in line["tags"][0]

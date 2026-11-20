@@ -18,6 +18,7 @@ class TagResult:
     corners_px: np.ndarray  # (4, 2) in the stitched frame
     refined: bool
     seam: bool
+    near: bool
     hamming: int | None
     decision_margin: float | None
     distance_m: float | None = None  # camera to tag centre (needs tags.size_m)
@@ -28,6 +29,7 @@ class TagResult:
     def to_dict(self) -> dict:
         d = {"id": self.tag_id, "yaw_deg": round(self.yaw_deg, 3), "pitch_deg": round(self.pitch_deg, 3),
              "corners_px": np.round(self.corners_px, 2).tolist(), "refined": self.refined, "seam": self.seam,
+             "near": self.near,
              "hamming": self.hamming,
              "margin": None if self.decision_margin is None else round(float(self.decision_margin), 1)}
         if self.position_m is not None:
@@ -59,7 +61,7 @@ def tag_results(tags: list[X4Tag], mount: Mount, frame_height: int, size_m: floa
         if ids is not None and t.tag_id not in ids:
             continue
         yaw, pitch = yaw_pitch_deg(mount.direction(t.center_ray))
-        r = TagResult(t.tag_id, yaw, pitch, t.corners, t.refined, t.seam, t.hamming, t.decision_margin)
+        r = TagResult(t.tag_id, yaw, pitch, t.corners, t.refined, t.seam, t.near, t.hamming, t.decision_margin)
         if size_m:
             pose = X4TagDetector.pose(t, size_m, frame_height)
             if pose is not None and pose[2] <= max_pose_error_px:
