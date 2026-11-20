@@ -16,12 +16,15 @@ class CameraConfig:
     fps: int = 30
     reduce: int = 1  # 2: libjpeg half-size decode (1440x720), cheaper but halves the range
     reconnect_s: float = 2.0  # wait between attempts when the camera is missing or stalls
+    # Time from the camera taking a frame to the frame arriving here (stitch, encode, USB). Subtracted from every
+    # timestamp. Unknown until measured on your setup (e.g. film a running stopwatch); 0 assumes none.
+    latency_ms: float = 0.0
 
 
 @dataclass
 class DetectorConfig:
     min_tag_px: int = 22
-    threads: int = 1  # NAPA threads per call (Pi 5: up to 4 for lower latency)
+    threads: int = 1  # NAPA threads per call (Pi 5: 4 saves only ~1 ms; JPEG decode dominates)
     refine_bow_px: float | None = 0.2  # refine tags whose sides the frame bends more than this; None: never
     seam_px: int = 192  # 0: don't search across the left/right seam
     family: str = "tag36h11"
@@ -54,11 +57,28 @@ class Config:
     output: OutputConfig = field(default_factory=OutputConfig)
 
 
+_NUMBER = (int, float)
+_TYPES = {
+    "camera": dict(device=(str,), width=(int,), height=(int,), fps=(int,), reduce=(int,), reconnect_s=_NUMBER,
+                   latency_ms=_NUMBER),
+    "detector": dict(min_tag_px=(int,), threads=(int,), refine_bow_px=_NUMBER + (str,), seam_px=(int,), family=(str,),
+                     extra=(dict,)),
+    "tags": dict(size_m=_NUMBER + (str,), max_pose_error_px=_NUMBER, ids=(list,)),
+    "mount": {k: _NUMBER for k in ("x_m", "y_m", "z_m", "roll_deg", "pitch_deg", "yaw_deg")},
+    "output": dict(print=(bool,), udp=(str,), nt_server=(str, int), nt_table=(str,), nt_client_name=(str,),
+                   stats_every_s=_NUMBER),
+}
+
+
 def _build(cls, data: dict, where: str):
     names = {f.name for f in fields(cls)}
     unknown = set(data) - names
     if unknown:
         raise ValueError(f"unknown key(s) in [{where}]: {', '.join(sorted(unknown))}")
+    for key, value in data.items():
+        allowed = _TYPES[where][key]
+        if isinstance(value, bool) and bool not in allowed or not isinstance(value, allowed):
+            raise ValueError(f"[{where}] {key} = {value!r}: expected {' or '.join(t.__name__ for t in allowed)}")
     return cls(**data)
 
 
@@ -73,8 +93,17 @@ def load(path: str | None) -> Config:
     if unknown:
         raise ValueError(f"unknown section(s): {', '.join(sorted(unknown))}")
     built = {name: _build(cls, data.get(name, {}), name) for name, cls in sections.items()}
-    # TOML has no null: "none"/"off" in a few optional values means unset.
-    for obj, key in ((built["detector"], "refine_bow_px"), (built["tags"], "size_m"), (built["camera"], "device")):
-        if isinstance(getattr(obj, key), str) and getattr(obj, key).lower() in ("none", "off", "auto"):
-            setattr(obj, key, None)
+    # TOML has no null: "none"/"off" means unset for these, "auto" means find the camera.
+    for obj, key, words in ((built["detector"], "refine_bow_px", ("none", "off")), (built["tags"], "size_m", ("none", "off")),
+                            (built["camera"], "device", ("auto",))):
+        value = getattr(obj, key)
+        if isinstance(value, str):
+            if value.lower() not in words and key != "device":
+                raise ValueError(f"{key} = {value!r}: expected a number or {' / '.join(repr(w) for w in words)}")
+            if value.lower() in words:
+                setattr(obj, key, None)
+    if built["camera"].reduce not in (1, 2, 4):
+        raise ValueError(f"[camera] reduce = {built['camera'].reduce}: expected 1, 2 or 4")
+    if built["output"].nt_server is not None:
+        built["output"].nt_server = str(built["output"].nt_server)  # a bare team number is fine
     return Config(**built)

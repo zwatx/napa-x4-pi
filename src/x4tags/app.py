@@ -57,6 +57,8 @@ class ReplaySource:
         t0 = time.perf_counter()
         gray = cv2.imdecode(buf, self.flag)
         self.last_decode_ms = (time.perf_counter() - t0) * 1e3
+        if gray is None:
+            raise ValueError(f"frame {self.i - 1} of {self.device} doesn't decode")
         return t, gray
 
     def close(self):
@@ -79,27 +81,49 @@ def cpu_temp_c() -> float | None:
 
 class Stats:
     def __init__(self, every_s: float):
-        self.every_s, self.t0, self.rows = every_s, time.monotonic(), []
+        self.every_s, self.t0, self.rows, self.errors = every_s, time.monotonic(), [], 0
 
-    def add(self, frame: FrameResult, age_ms: float):
+    def add(self, frame: FrameResult, age_ms: float, source) -> None:
+        if not self.every_s:
+            return
         self.rows.append((frame.decode_ms, frame.detect_ms, age_ms, len(frame.tags)))
         now = time.monotonic()
-        if self.every_s and now - self.t0 >= self.every_s:
+        if now - self.t0 >= self.every_s:
             r = np.array(self.rows)
             temp = cpu_temp_c()
-            log.info("%.1f fps | decode %.1f detect %.1f (p95 %.1f) age %.1f (p95 %.1f) ms | tags/frame %.2f%s",
+            log.info("%.1f fps | decode %.1f detect %.1f (p95 %.1f) age %.1f (p95 %.1f) ms | tags/frame %.2f | "
+                     "camera frames skipped %d | errors %d%s",
                      len(r) / (now - self.t0), np.median(r[:, 0]), np.median(r[:, 1]), np.percentile(r[:, 1], 95),
-                     np.median(r[:, 2]), np.percentile(r[:, 2], 95), r[:, 3].mean(),
+                     np.median(r[:, 2]), np.percentile(r[:, 2], 95), r[:, 3].mean(), source.dropped, self.errors,
                      "" if temp is None else f" | {temp:.0f} C")
             self.t0, self.rows = now, []
 
 
+class RateLimitedLog:
+    """Log an error at most every ``every_s`` seconds, with how many were suppressed."""
+
+    def __init__(self, every_s: float = 5.0):
+        self.every_s, self.last, self.suppressed = every_s, -1e9, 0
+
+    def __call__(self, msg: str, *args, exc_info=False):
+        now = time.monotonic()
+        if now - self.last >= self.every_s:
+            extra = f" (+{self.suppressed} more since)" if self.suppressed else ""
+            log.error(msg + extra, *args, exc_info=exc_info)
+            self.last, self.suppressed = now, 0
+        else:
+            self.suppressed += 1
+
+
 def run(cfg: config_mod.Config, replay: str | None = None, seconds: float | None = None, loop: bool = False) -> int:
+    cv2.setNumThreads(1)  # OpenCV's own pool would compete with NAPA's threads and the grab thread
     det_cfg = cfg.detector
     detector = X4TagDetector(refine_bow_px=det_cfg.refine_bow_px, seam_px=det_cfg.seam_px, min_tag_px=det_cfg.min_tag_px,
                              threads=det_cfg.threads, family=det_cfg.family, **det_cfg.extra)
     publishers = make_publishers(cfg.output)
     stats = Stats(cfg.output.stats_every_s)
+    frame_error = RateLimitedLog()
+    latency_s = cfg.camera.latency_ms / 1e3
     stop = {"now": False}
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.update(now=True))
@@ -117,8 +141,7 @@ def run(cfg: config_mod.Config, replay: str | None = None, seconds: float | None
                 time.sleep(cfg.camera.reconnect_s)
                 continue
             log.info("reading %s", source.device)
-            for p in publishers:
-                p.camera_connected(True)
+            connected = False
             try:
                 while not stop["now"] and (deadline is None or time.monotonic() < deadline):
                     try:
@@ -131,16 +154,33 @@ def run(cfg: config_mod.Config, replay: str | None = None, seconds: float | None
                     except TimeoutError as e:  # stalled or unplugged: reopen it
                         log.warning("camera: %s; reopening", e)
                         break
-                    t0 = time.perf_counter()
-                    tags = detector.detect(gray)
-                    detect_ms = (time.perf_counter() - t0) * 1e3
-                    frame = FrameResult(seq, t_cap, gray.shape[1], gray.shape[0], source.last_decode_ms, detect_ms,
-                                        tag_results(tags, cfg.mount, gray.shape[0], cfg.tags.size_m,
-                                                    cfg.tags.max_pose_error_px, cfg.tags.ids))
-                    for p in publishers:
-                        p.publish(frame)
-                    stats.add(frame, (time.monotonic() - t_cap) * 1e3)
-                    seq += 1
+                    if gray.shape[1] != 2 * gray.shape[0]:
+                        log.error("camera sends %dx%d, not the 2:1 stitched 360-degree picture: set the X4's webcam "
+                                  "output to 360 (2880x1440); retrying in %.0f s", gray.shape[1], gray.shape[0],
+                                  cfg.camera.reconnect_s)
+                        time.sleep(cfg.camera.reconnect_s)
+                        break
+                    if not connected:
+                        connected = True
+                        for p in publishers:
+                            p.camera_connected(True)
+                    t_cap -= latency_s  # when the camera took it, as well as we know (camera.latency_ms)
+                    try:
+                        t0 = time.perf_counter()
+                        tags = detector.detect(gray)
+                        detect_ms = (time.perf_counter() - t0) * 1e3
+                        frame = FrameResult(seq, t_cap, gray.shape[1], gray.shape[0], source.last_decode_ms, detect_ms,
+                                            tag_results(tags, cfg.mount, gray.shape[0], cfg.tags.size_m,
+                                                        cfg.tags.max_pose_error_px, cfg.tags.ids))
+                        for p in publishers:
+                            p.publish(frame)
+                    except Exception:  # one bad frame must not take the robot's vision down
+                        stats.errors += 1
+                        frame_error("frame %d failed", seq, exc_info=True)
+                        continue
+                    finally:
+                        seq += 1
+                    stats.add(frame, (time.monotonic() - t_cap) * 1e3, source)
             finally:
                 source.close()
                 for p in publishers:

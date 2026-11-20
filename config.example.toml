@@ -7,10 +7,11 @@ height = 1440
 fps = 30
 reduce = 1                   # 2 = decode at half size (1440x720): cheaper, halves the range
 reconnect_s = 2.0
+latency_ms = 0.0             # camera -> Pi delay (stitch, encode, USB), subtracted from timestamps; measure it
 
 [detector]
 min_tag_px = 22              # smallest tag side (pixels) NAPA looks for; 16 finds more far tags, costs time
-threads = 1                  # NAPA threads per frame; 2-4 on a Pi 5 lowers latency
+threads = 1                  # NAPA threads per frame; 4 saves only ~1 ms on a Pi 5 (JPEG decode dominates)
 refine_bow_px = 0.2          # refine tags the 360 frame bends more than this ("none" = never)
 seam_px = 192                # search this far either side of the left/right seam (0 = don't)
 # family = "tag36h11"
@@ -32,6 +33,6 @@ yaw_deg = 0.0                # + turns it left; 0 = picture middle looks along r
 [output]
 print = false                # JSON line per frame on stdout
 # udp = "10.12.34.2:5800"    # JSON datagram per frame
-# nt_server = "1234"         # NetworkTables 4: team number, or host ("10.12.34.2", "localhost"[:port])
+# nt_server = 1234           # NetworkTables 4: team number, or a host ("10.12.34.2", "localhost:5810")
 nt_table = "x4tags"
 stats_every_s = 10.0

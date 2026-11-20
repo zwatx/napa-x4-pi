@@ -29,3 +29,14 @@ def test_none_strings_and_unknown_keys(tmp_path):
     p.write_text("[cameras]\n")
     with pytest.raises(ValueError, match="cameras"):
         config.load(str(p))
+
+
+def test_types_are_checked_and_team_numbers_need_no_quotes(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text("[output]\nnt_server = 1234\n")
+    assert config.load(str(p)).output.nt_server == "1234"
+    for bad, match in (("[camera]\nreduce = 3\n", "reduce"), ('[mount]\nyaw_deg = "90"\n', "yaw_deg"),
+                       ('[tags]\nsize_m = "auto"\n', "size_m"), ("[output]\nprint = 1\n", "print")):
+        p.write_text(bad)
+        with pytest.raises(ValueError, match=match):
+            config.load(str(p))
