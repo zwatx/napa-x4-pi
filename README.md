@@ -66,7 +66,9 @@ The 1920x1080 mode (`[camera] mode = "dual1080"`, below): the same flips took 13
 default there). Its picture has 615 pixels per radian at the middle of each view and ~820 at +-60 degrees, against
 458 in the 360-degree mode, so a tag stays above the 22 px minimum to 4.5-6 m instead of 3.4 m. With 13 tags on a
 screen in view: decode 2.7 ms against 4.7, detection the same (5.4 ms), and corner directions agreeing with the
-360-degree mode's to 0.18 px median (0.57 max).
+360-degree mode's to 0.18 px median (0.57 max). On the Pi 5, the rendered room frames resampled into this layout
+(field pose on, 30 fps): decode 5.9 ms against 13.3, detection 18.1 ms against 16.5 (more tags need straightening),
+8.8 tags per frame against 11.1 (the blind gaps), results out 24 ms after arrival against 30.
 
 ## Hardware
 
