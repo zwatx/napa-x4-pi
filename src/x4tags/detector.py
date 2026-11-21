@@ -9,6 +9,9 @@ horizon, and a tag straight behind the camera is cut in two by the left/right ed
    view centred on it (where its sides are straight again), and its corners are taken from there.
 
 Results carry corners in the frame's pixels and the direction of each corner, which is what pose and bearing need.
+
+``mode="dual1080"`` takes the X4's 1920x1080 mode instead (front and back views stacked; see ``x4tags.dual``): NAPA
+runs on the frame, tags across the line between the halves are dropped, and bent tags are refined the same way.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import cv2
 import numpy as np
 from napa_vision import NapaDetector
 
+from .dual import DualView
 from .equirect import TangentView, angular_radius, pixel_to_ray, ray_to_pixel, side_bow_px, tangent_basis, unwrap_near
 
 
@@ -68,6 +72,9 @@ class X4Tag:
 class X4TagDetector:
     """``detect(gray)`` on a stitched X4 frame (2:1). Extra keyword arguments go to ``NapaDetector``.
 
+    ``mode``: "equirect" for the 360-degree 2880x1440 picture (or a reduced decode of it), "dual1080" for the
+    1920x1080 front/back picture (or a reduced decode); the seam and near-view searches apply to "equirect" only.
+
     ``refine_bow_px``: refine tags whose sides the frame bends by more than this (None: never refine).
     ``seam_px``: width searched on each side of the left/right seam (0: don't search it); should exceed half the
     widest tag you need there.
@@ -80,9 +87,15 @@ class X4TagDetector:
     call: a new close tag is found within 12 / near_per_frame frames, then kept every frame.
     """
 
+    MODES = ("equirect", "dual1080")
+
     def __init__(self, refine_bow_px: float | None = 0.2, seam_px: int = 192, view_margin: float = 1.7,
                  max_view_px: int = 400, min_view_px: int = 256, near_scale: float = 1 / 3, near_per_frame: int = 2,
-                 **napa_kwargs):
+                 mode: str = "equirect", **napa_kwargs):
+        if mode not in self.MODES:
+            raise ValueError(f"mode {mode!r}: expected one of {', '.join(self.MODES)}")
+        self.mode = mode
+        self._dual: DualView | None = None
         self.napa = NapaDetector(**napa_kwargs)
         self.refine_bow_px, self.seam_px = refine_bow_px, int(seam_px)
         self.view_margin, self.max_view_px, self.min_view_px = view_margin, int(max_view_px), int(min_view_px)
@@ -91,8 +104,23 @@ class X4TagDetector:
         self._near_next = 0  # next view in the rotation
         self._near_hits: set[int] = set()  # views that found a close tag on the previous call
 
+    def projection(self, width: int, height: int) -> DualView | None:
+        """The frame's geometry for "dual1080" (None for the equirect frame, handled by ``x4tags.equirect``)."""
+        if self.mode != "dual1080":
+            return None
+        if self._dual is None or (self._dual.width, self._dual.height) != (width, height):
+            self._dual = DualView(width, height)
+        return self._dual
+
+    def px_per_rad(self, width: int, height: int) -> float:
+        """The frame's pixels per radian (at the middle of each half for "dual1080"), for errors in pixels."""
+        proj = self.projection(width, height)
+        return height / np.pi if proj is None else proj.px_per_rad
+
     def detect(self, gray: np.ndarray) -> list[X4Tag]:
         height, width = gray.shape[:2]
+        if self.mode == "dual1080":
+            return self._detect_dual(gray, width, height)
         if width != 2 * height:
             raise ValueError(f"expected a 2:1 equirectangular frame, got {width}x{height}")
         tags = [self._tag(o, width, height, seam=False) for o in self.napa.detect(gray)]
@@ -106,8 +134,28 @@ class X4TagDetector:
                     self._refine(gray, t, width, height)
         return tags
 
+    def _detect_dual(self, gray, width, height):
+        proj = self.projection(width, height)  # raises unless 16:9
+        tags = []
+        for o in self.napa.detect(gray):
+            c = np.asarray(o.corners, float).reshape(4, 2)
+            front = proj.half_of(c[:, 1])
+            if front.any() != front.all():
+                continue  # across the line between the halves: neither view holds the whole tag
+            tags.append(self._tag(o, width, height, seam=False, projection=proj))
+        if self.refine_bow_px is not None:
+            for t in tags:
+                if t.bow_px > self.refine_bow_px:
+                    self._refine(gray, t, width, height, proj)
+        return tags
+
     # -- steps
-    def _tag(self, obs, width, height, seam, corners=None):
+    def _tag(self, obs, width, height, seam, corners=None, projection=None):
+        if projection is not None:
+            c = np.asarray(obs.corners if corners is None else corners, float).reshape(4, 2).copy()
+            rays = projection.pixel_to_ray(c[:, 0], c[:, 1])
+            return X4Tag(int(obs.tag_id), c, rays, obs.hamming, obs.decision_margin, _bow_px(c, rays, projection),
+                         False, seam)
         c = np.asarray(obs.corners if corners is None else corners, float).reshape(4, 2).copy()
         c[:, 0] = unwrap_near(c[:, 0], c[0, 0], width)
         mid = np.mod(c[:, 0].mean() + 0.5, width) - 0.5  # keep the middle in [-0.5, W - 0.5)
@@ -184,18 +232,19 @@ class X4TagDetector:
         self._near_hits = hits
         return out
 
-    def _refine(self, gray, tag, width, height):
+    def _refine(self, gray, tag, width, height, projection=None):
         centre = tag.rays.sum(0)
         half_angle = min(np.radians(75.0), angular_radius(tag.rays, centre) * self.view_margin)
         lat = np.arcsin(np.clip(-centre[1] / np.linalg.norm(centre), -1, 1))
-        if abs(lat) + np.sqrt(2) * half_angle > np.radians(88.0):  # the view would reach over a pole
+        if projection is None and abs(lat) + np.sqrt(2) * half_angle > np.radians(88.0):  # the view would reach over a pole
             tag.extra["refine"] = "too near a pole"
             return
         # The frame's own scale (pixels per radian of latitude), or less for big tags so the view stays under
         # max_view_px: a big tag keeps plenty of edge pixels at half scale and the view costs a quarter as much.
-        focal = min(height / np.pi, (self.max_view_px - 1) / (2 * np.tan(half_angle)))
+        scale = height / np.pi if projection is None else projection.local_px_per_rad(centre)
+        focal = min(scale, (self.max_view_px - 1) / (2 * np.tan(half_angle)))
         size = 2 * int(np.ceil(focal * np.tan(half_angle))) + 1
-        view = TangentView(centre, focal, size, width, height)
+        view = TangentView(centre, focal, size, width, height, projection)
         patch = view.render(gray)
         # NAPA misses some borderline tags in very small images that it finds in the full frame; padding the view
         # with its own edge pixels to a minimum size brings them back (and costs little).
@@ -203,7 +252,7 @@ class X4TagDetector:
         if pad:
             patch = cv2.copyMakeBorder(patch, pad, pad, pad, pad, cv2.BORDER_REPLICATE)
         best, best_d = None, 0.25 * size
-        tag.extra["view_scale"] = round(focal / (height / np.pi), 3)
+        tag.extra["view_scale"] = round(focal / scale, 3)
         for o in self.napa.detect(patch):
             if int(o.tag_id) != tag.tag_id:
                 continue
@@ -216,25 +265,27 @@ class X4TagDetector:
         pc = np.asarray(best.corners, float).reshape(4, 2) - pad
         rays = view.view_to_ray(pc)
         rays /= np.linalg.norm(rays, axis=1, keepdims=True)
-        px = ray_to_pixel(rays, width, height)
+        px = ray_to_pixel(rays, width, height) if projection is None else projection.ray_to_pixel(rays, half=view.half)
         # Keep the full-frame corner order: match the view's corners to the old ones by direction.
         order = [int(np.argmax(rays @ r)) for r in tag.rays]
         if sorted(order) != [0, 1, 2, 3]:
             tag.extra["refine"] = "corner order mismatch"
             return
         px, rays = px[order], rays[order]
-        px[:, 0] = unwrap_near(px[:, 0], tag.corners[:, 0], width)
+        if projection is None:
+            px[:, 0] = unwrap_near(px[:, 0], tag.corners[:, 0], width)
         tag.corners, tag.rays, tag.refined = px, rays, True
         tag.hamming, tag.decision_margin = best.hamming, best.decision_margin
         tag.extra["view_px"] = size
 
     # -- pose
     @staticmethod
-    def pose(tag: X4Tag, tag_size_m: float, frame_height: int = 1440):
+    def pose(tag: X4Tag, tag_size_m: float, frame_height: int = 1440, px_per_rad: float | None = None):
         """Tag pose in the camera frame (x right, y down, z forward), from a pinhole view centred on the tag.
 
         Returns (R 3x3, t 3, worst corner reprojection error in pixels at the frame's scale) for the lower-error IPPE
-        solution, or None. t is the tag's centre. R's columns are the tag's axes in the camera frame, with OpenCV's
+        solution, or None. t is the tag's centre. The error is in pixels of ``px_per_rad`` (default: the equirect
+        frame's, ``frame_height / pi``). R's columns are the tag's axes in the camera frame, with OpenCV's
         square corners for NAPA's corner order (corner 0 is the printed bottom-right of ``napa_vision.tags.tag_image``):
         x towards the printed left edge, y towards the printed bottom, z out of the printed face. A tag seen nearly
         face-on has two close IPPE solutions; the chosen one can be tilted a few degrees the wrong way.
@@ -256,4 +307,14 @@ class X4TagDetector:
                 best = (basis.T @ R_local, basis.T @ tv.ravel(), err)
         if best is None:
             return None
-        return best[0], best[1], best[2] * frame_height / np.pi  # normalized units -> pixels at the frame's scale
+        scale = frame_height / np.pi if px_per_rad is None else px_per_rad
+        return best[0], best[1], best[2] * scale  # normalized units -> pixels at the frame's scale
+
+
+def _bow_px(corners: np.ndarray, rays: np.ndarray, projection: DualView) -> float:
+    """``side_bow_px`` for another geometry: the largest gap between each side's chord midpoint and where the true
+    (great-circle) side's midpoint lands."""
+    front = bool(projection.half_of(corners[:, 1]).all())
+    mids = projection.ray_to_pixel(rays + np.roll(rays, -1, 0), half="front" if front else "back")
+    chord = (corners + np.roll(corners, -1, 0)) / 2
+    return float(np.linalg.norm(mids - chord, axis=1).max())

@@ -60,12 +60,16 @@ def tangent_bases(directions) -> np.ndarray:
 class TangentView:
     """A small pinhole view of the sphere centred on ``direction``: straight lines in the world stay straight here.
 
-    ``focal`` is in pixels per radian at the centre; ``size`` is the square view's side in pixels.
+    ``focal`` is in pixels per radian at the centre; ``size`` is the square view's side in pixels. ``projection``:
+    the source image's geometry if it isn't this module's equirect frame: an ``x4tags.dual.DualView``, through the
+    half the view faces; whatever falls outside that half renders black.
     """
 
-    def __init__(self, direction, focal: float, size: int, width: int, height: int):
+    def __init__(self, direction, focal: float, size: int, width: int, height: int, projection=None):
         self.basis = tangent_basis(direction)
         self.focal, self.size, self.width, self.height = float(focal), int(size), width, height
+        self.projection = projection
+        self.half = None if projection is None else ("front" if projection.facing(self.basis[2]) else "back")
         self.c = (self.size - 1) / 2.0
 
     def view_to_ray(self, px) -> np.ndarray:
@@ -87,7 +91,7 @@ class TangentView:
         (linear interpolation error grows with the step squared), to a power of two no smaller than ``min_step``.
         Coarse near the horizon, finer for big views far from it."""
         n = self.size
-        centre_u = ray_to_pixel(self.basis[2], self.width, self.height)[0]
+        centre_u = ray_to_pixel(self.basis[2], self.width, self.height)[0] if self.projection is None else 0.0
         k = int(step)
         g, uv = self._knots(n, k, centre_u)
         m = len(g)
@@ -104,9 +108,13 @@ class TangentView:
         big = (m * k, m * k)
         mx = cv2.resize(uv[..., 0].astype(np.float32), big, interpolation=cv2.INTER_LINEAR)[k:k + n, k:k + n]
         my = cv2.resize(uv[..., 1].astype(np.float32), big, interpolation=cv2.INTER_LINEAR)[k:k + n, k:k + n]
+        self.last_step = k
+        if self.projection is not None:
+            off = self.projection.outside_half(mx, my, self.half)
+            mx[off], my[off] = -1e4, -1e4
+            return cv2.remap(image, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         if uv[..., 0].min() < -0.5 or uv[..., 0].max() >= self.width - 0.5:  # this view crosses the seam
             mx = np.mod(mx + 0.5, np.float32(self.width)) - np.float32(0.5)
-        self.last_step = k
         return cv2.remap(image, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
 
     def _knots(self, n, k, centre_u):
@@ -117,6 +125,8 @@ class TangentView:
 
     def _uv(self, xs, ys, centre_u):
         gx, gy = np.meshgrid(xs, ys)
+        if self.projection is not None:
+            return self.projection.ray_to_pixel(self.view_to_ray(np.stack([gx, gy], -1)), half=self.half)
         uv = ray_to_pixel(self.view_to_ray(np.stack([gx, gy], -1)), self.width, self.height)
         uv[..., 0] = unwrap_near(uv[..., 0], centre_u, self.width)  # continuous across the seam
         return uv

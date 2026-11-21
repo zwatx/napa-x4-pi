@@ -102,3 +102,15 @@ def worst_corner_error(corners: np.ndarray, truth: np.ndarray, width: int = W) -
     c[:, 0] = unwrap_near(c[:, 0], truth[:, 0].mean(), width)
     orders = [np.roll(o, k, 0) for o in (c, c[::-1]) for k in range(4)]
     return min(float(np.linalg.norm(o - truth, axis=1).max()) for o in orders)
+
+
+def equirect_to_dual(img: np.ndarray, width: int = 1920, height: int = 1080) -> np.ndarray:
+    """Resample a rendered equirect frame into the X4's 1920x1080 layout through the calibrated model."""
+    import cv2
+
+    from x4tags.dual import DualView
+
+    d = DualView(width, height)
+    u, v = np.meshgrid(np.arange(width, dtype=float), np.arange(height, dtype=float))
+    uv = ray_to_pixel(d.pixel_to_ray(u, v), img.shape[1], img.shape[0]).astype(np.float32)
+    return cv2.remap(img, uv[..., 0], uv[..., 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
