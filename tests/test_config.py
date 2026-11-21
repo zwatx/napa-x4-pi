@@ -9,7 +9,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def test_example_config_loads():
     cfg = config.load(os.path.join(ROOT, "config.example.toml"))
-    assert cfg.camera.width == 2880 and cfg.tags.size_m == pytest.approx(0.1651)
+    assert cfg.camera.size() == (2880, 1440) and cfg.tags.size_m == pytest.approx(0.1651)
     assert cfg.mount.z_m == 0.5 and cfg.output.nt_server is None
 
 
@@ -39,4 +39,25 @@ def test_types_are_checked_and_team_numbers_need_no_quotes(tmp_path):
                        ('[tags]\nsize_m = "auto"\n', "size_m"), ("[output]\nprint = 1\n", "print")):
         p.write_text(bad)
         with pytest.raises(ValueError, match=match):
+            config.load(str(p))
+
+
+def test_camera_mode_sets_the_size_and_latency(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text('[camera]\nmode = "dual1080"\n')
+    cfg = config.load(str(p))
+    assert cfg.camera.size() == (1920, 1080) and cfg.camera.latency() == 115.0
+    p.write_text('[camera]\nmode = "dual1080"\nlatency_ms = 90\nwidth = 960\nheight = 540\n')
+    cfg = config.load(str(p))
+    assert cfg.camera.size() == (960, 540) and cfg.camera.latency() == 90.0
+    p.write_text('[camera]\nmode = "fisheye"\n')
+    with pytest.raises(ValueError, match="mode"):
+        config.load(str(p))
+
+
+def test_width_and_height_must_match_the_mode(tmp_path):
+    p = tmp_path / "c.toml"
+    for body in ('[camera]\nmode = "dual1080"\nwidth = 2880\nheight = 1440\n', '[camera]\nwidth = 1920\n'):
+        p.write_text(body)
+        with pytest.raises(ValueError, match="width"):
             config.load(str(p))

@@ -159,7 +159,7 @@ def run(cfg: config_mod.Config, replay: str | None = None, seconds: float | None
     det_cfg = cfg.detector
     detector = X4TagDetector(refine_bow_px=det_cfg.refine_bow_px, seam_px=det_cfg.seam_px, near_scale=det_cfg.near_scale,
                              near_per_frame=det_cfg.near_per_frame, min_tag_px=det_cfg.min_tag_px,
-                             threads=det_cfg.threads, family=det_cfg.family, **det_cfg.extra)
+                             mode=cfg.camera.mode, threads=det_cfg.threads, family=det_cfg.family, **det_cfg.extra)
     localizer = None
     if cfg.field.layout:
         layout = FieldLayout.load(cfg.field.layout)
@@ -169,7 +169,7 @@ def run(cfg: config_mod.Config, replay: str | None = None, seconds: float | None
     publishers = make_publishers(cfg.output)
     stats = Stats(cfg.output.stats_every_s)
     frame_error = RateLimitedLog()
-    latency_s = cfg.camera.latency_ms / 1e3
+    latency_s = cfg.camera.latency() / 1e3
     stop = {"now": False}
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.update(now=True))
@@ -179,7 +179,7 @@ def run(cfg: config_mod.Config, replay: str | None = None, seconds: float | None
         while not stop["now"] and (deadline is None or time.monotonic() < deadline):
             try:
                 source = (ReplaySource(replay, cfg.camera.fps, loop, cfg.camera.reduce) if replay else
-                          X4Webcam(cfg.camera.device, cfg.camera.width, cfg.camera.height, cfg.camera.fps, cfg.camera.reduce))
+                          X4Webcam(cfg.camera.device, *cfg.camera.size(), cfg.camera.fps, cfg.camera.reduce))
             except (RuntimeError, OSError) as e:
                 log.warning("camera: %s; retrying in %.0f s", e, cfg.camera.reconnect_s)
                 for p in publishers:
@@ -200,9 +200,11 @@ def run(cfg: config_mod.Config, replay: str | None = None, seconds: float | None
                     except TimeoutError as e:  # stalled or unplugged: reopen it
                         log.warning("camera: %s; reopening", e)
                         break
-                    if gray.shape[1] != 2 * gray.shape[0]:
-                        log.error("camera sends %dx%d, not the 2:1 stitched 360-degree picture: set the X4's webcam "
-                                  "output to 360 (2880x1440); retrying in %.0f s", gray.shape[1], gray.shape[0],
+                    want = config_mod.MODE_SIZES[cfg.camera.mode]
+                    if gray.shape[1] * want[1] != gray.shape[0] * want[0]:
+                        log.error("camera sends %dx%d, not the %dx%d picture of [camera] mode = %r: set the mode to "
+                                  "match (\"equirect\" for 2880x1440, \"dual1080\" for 1920x1080) or the X4's webcam "
+                                  "output; retrying in %.0f s", gray.shape[1], gray.shape[0], *want, cfg.camera.mode,
                                   cfg.camera.reconnect_s)
                         time.sleep(cfg.camera.reconnect_s)
                         break
@@ -212,15 +214,16 @@ def run(cfg: config_mod.Config, replay: str | None = None, seconds: float | None
                             p.camera_connected(True)
                     t_cap -= latency_s  # when the camera took it, as well as we know (camera.latency_ms)
                     try:
+                        px_per_rad = detector.px_per_rad(gray.shape[1], gray.shape[0])
                         t0 = time.perf_counter()
                         tags = detector.detect(gray)
                         detect_ms = (time.perf_counter() - t0) * 1e3
                         frame = FrameResult(seq, t_cap, gray.shape[1], gray.shape[0], source.last_decode_ms, detect_ms,
                                             tag_results(tags, cfg.mount, gray.shape[0], cfg.tags.size_m,
-                                                        cfg.tags.max_pose_error_px, cfg.tags.ids))
+                                                        cfg.tags.max_pose_error_px, cfg.tags.ids, px_per_rad))
                         if localizer is not None:
                             try:  # a failed field pose mustn't cost the frame its tags
-                                frame.field_pose = localizer.solve(tags, gray.shape[0])
+                                frame.field_pose = localizer.solve(tags, gray.shape[0], px_per_rad)
                             except Exception:
                                 stats.errors += 1
                                 frame_error("field pose for frame %d failed", seq, exc_info=True)

@@ -9,17 +9,33 @@ from dataclasses import field as _field  # a section is called `field`
 from .mount import Mount
 
 
+MODE_SIZES = {"equirect": (2880, 1440), "dual1080": (1920, 1080)}
+# Measured on one X4 with check_latency (median 154-163 ms and 133 ms), less ~20 ms for the screen's own delay.
+MODE_LATENCY_MS = {"equirect": 140.0, "dual1080": 115.0}
+
+
 @dataclass
 class CameraConfig:
     device: str | None = None  # None: find the X4 by its USB vendor ID
-    width: int = 2880
-    height: int = 1440
+    # "equirect": the 360-degree 2880x1440 picture. "dual1080": the 1920x1080 picture, front and back views stacked
+    # (1.3-1.8x the pixels per degree and ~20 ms less latency, but +-76 degrees each side and +-24 up/down).
+    mode: str = "equirect"
+    width: int | None = None  # None: the mode's size
+    height: int | None = None
     fps: int = 30
     reduce: int = 1  # 2: libjpeg half-size decode (1440x720), cheaper but halves the range
     reconnect_s: float = 2.0  # wait between attempts when the camera is missing or stalls
-    # Time from the camera taking a frame to the frame arriving here (stitch, encode, USB). Subtracted from every
-    # timestamp. Unknown until measured on your setup (e.g. film a running stopwatch); 0 assumes none.
-    latency_ms: float = 140.0  # measured on one X4 (check_latency: 154-163 ms, less ~20 ms of screen delay)
+    # Time from the camera taking a frame to the frame arriving here (stitch, encode, USB), subtracted from every
+    # timestamp. None: the mode's value measured on one X4 (MODE_LATENCY_MS); check yours with check_latency.
+    latency_ms: float | None = None
+
+    def size(self) -> tuple[int, int]:
+        default = MODE_SIZES[self.mode]
+        return (self.width or default[0], self.height or default[1])
+
+    def latency(self) -> float:
+        """Camera latency in ms: the configured value, or the mode's measured default."""
+        return MODE_LATENCY_MS[self.mode] if self.latency_ms is None else float(self.latency_ms)
 
 
 @dataclass
@@ -72,7 +88,7 @@ class Config:
 
 _NUMBER = (int, float)
 _TYPES = {
-    "camera": dict(device=(str,), width=(int,), height=(int,), fps=(int,), reduce=(int,), reconnect_s=_NUMBER,
+    "camera": dict(device=(str,), mode=(str,), width=(int,), height=(int,), fps=(int,), reduce=(int,), reconnect_s=_NUMBER,
                    latency_ms=_NUMBER),
     "detector": dict(min_tag_px=(int,), threads=(int,), refine_bow_px=_NUMBER + (str,), seam_px=(int,),
                      near_scale=_NUMBER, near_per_frame=(int,), family=(str,), extra=(dict,)),
@@ -116,6 +132,15 @@ def load(path: str | None) -> Config:
                 raise ValueError(f"{key} = {value!r}: expected a number or {' / '.join(repr(w) for w in words)}")
             if value.lower() in words:
                 setattr(obj, key, None)
+    if built["camera"].mode not in MODE_SIZES:
+        raise ValueError(f"[camera] mode = {built['camera'].mode!r}: expected {' or '.join(map(repr, MODE_SIZES))}")
+    cam = built["camera"]
+    if (cam.width is None) != (cam.height is None):
+        raise ValueError("[camera] width and height: set both or neither (neither: the mode's size)")
+    want = MODE_SIZES[cam.mode]
+    if cam.width is not None and cam.width * want[1] != cam.height * want[0]:
+        raise ValueError(f"[camera] {cam.width}x{cam.height} isn't the shape of mode {cam.mode!r} ({want[0]}x{want[1]}): "
+                         f"remove width/height, or set the mode")
     if built["camera"].reduce not in (1, 2, 4):
         raise ValueError(f"[camera] reduce = {built['camera'].reduce}: expected 1, 2 or 4")
     if built["field"].layout is not None and built["tags"].size_m is None:

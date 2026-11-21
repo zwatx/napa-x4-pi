@@ -6,7 +6,7 @@ arrival time of the first frame showing the new ID minus the flip time, which al
 (the compositor and panel: typically 1-3 refreshes, 17-50 ms at 60 Hz), so treat the result as an upper bound;
 subtract your screen's delay if you know it. Use the median as ``[camera] latency_ms``.
 
-    python -m x4tags.check_latency               # then open http://localhost:8765 in a browser here, full screen
+    python -m x4tags.check_latency [--mode dual1080]   # then open http://localhost:8765 here, full screen
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import numpy as np
 from napa_vision.tags import png_bytes, tag_image
 
 from .capture import X4Webcam
+from .config import MODE_SIZES
 from .detector import X4TagDetector
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>x4tags latency</title>
@@ -91,6 +92,7 @@ def main(argv=None) -> int:
     ap.add_argument("--flips", type=int, default=20)
     ap.add_argument("--period", type=float, default=2.0, help="seconds between flips")
     ap.add_argument("--ids", default="0,1", help="the two tag IDs to show")
+    ap.add_argument("--mode", choices=sorted(MODE_SIZES), default="equirect", help="the X4 picture to measure")
     a = ap.parse_args(argv)
     id_a, id_b = (int(x) for x in a.ids.split(","))
     flips: list[tuple[float, int]] = []
@@ -98,9 +100,12 @@ def main(argv=None) -> int:
     server = make_server({"A": id_a, "B": id_b}, a.period, a.port, flips)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"open http://localhost:{a.port} in a browser on this computer, full screen, and point the X4 at it")
-    det = X4TagDetector(near_scale=0, seam_px=0)  # a big tag in front: no extra searches to slow frames down
-    with X4Webcam(a.device) as cam:
+    det = X4TagDetector(near_scale=0, seam_px=0, mode=a.mode)  # a big tag in front: no extra searches
+    with X4Webcam(a.device, *MODE_SIZES[a.mode]) as cam:
         try:
+            if cam.size != MODE_SIZES[a.mode]:
+                print(f"the camera sends {cam.size[0]}x{cam.size[1]}, not mode {a.mode}'s {MODE_SIZES[a.mode]}")
+                return 1
             while len(flips) < a.flips + 1:
                 t, gray = cam.read(timeout=5.0)
                 frames.append((t, {x.tag_id for x in det.detect(gray)} & {id_a, id_b}))

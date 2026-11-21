@@ -79,14 +79,16 @@ class FieldLocalizer:
         self.layout, self.size, self.mount = layout, float(tag_size_m), mount
         self.max_rms_px, self.min_tags, self.huber_px = float(max_rms_px), max(1, int(min_tags)), float(huber_px)
         self.corner_noise_px, self.max_xy_std_m = float(corner_noise_px), float(max_xy_std_m)
-        self._set_height(1440)
+        self._set_scale(1440 / np.pi)
 
-    def _set_height(self, frame_height: int) -> None:
-        self.px_per_rad = frame_height / np.pi
+    def _set_scale(self, px_per_rad: float) -> None:
+        self.px_per_rad = float(px_per_rad)
         self.huber = self.huber_px / self.px_per_rad
 
-    def solve(self, tags: list[X4Tag], frame_height: int = 1440) -> FieldPose | None:
-        self._set_height(frame_height)
+    def solve(self, tags: list[X4Tag], frame_height: int = 1440, px_per_rad: float | None = None) -> FieldPose | None:
+        """Pixel thresholds are at ``px_per_rad`` (default: the equirect frame's, ``frame_height / pi``; pass
+        ``X4TagDetector.px_per_rad`` for another mode)."""
+        self._set_scale(frame_height / np.pi if px_per_rad is None else px_per_rad)
         tags = [t for t in tags if t.tag_id in self.layout]
         if len(tags) < self.min_tags:
             return None

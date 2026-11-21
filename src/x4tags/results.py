@@ -60,7 +60,7 @@ class FrameResult:
 
 
 def tag_results(tags: list[X4Tag], mount: Mount, frame_height: int, size_m: float | None, max_pose_error_px: float,
-                ids: list[int] | None = None) -> list[TagResult]:
+                ids: list[int] | None = None, px_per_rad: float | None = None) -> list[TagResult]:
     out = []
     for t in tags:
         if ids is not None and t.tag_id not in ids:
@@ -68,7 +68,7 @@ def tag_results(tags: list[X4Tag], mount: Mount, frame_height: int, size_m: floa
         yaw, pitch = yaw_pitch_deg(mount.direction(t.center_ray))
         r = TagResult(t.tag_id, yaw, pitch, t.corners, t.refined, t.seam, t.near, t.hamming, t.decision_margin)
         if size_m:
-            pose = X4TagDetector.pose(t, size_m, frame_height)
+            pose = X4TagDetector.pose(t, size_m, frame_height, px_per_rad)
             if pose is not None and pose[2] <= max_pose_error_px:
                 rot, pos = mount.pose(pose[0], pose[1])
                 r.distance_m, r.position_m, r.rotation, r.pose_error_px = float(np.linalg.norm(pose[1])), pos, rot, pose[2]
