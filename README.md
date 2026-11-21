@@ -62,13 +62,23 @@ frame). Grey decode 8.6 ms, results published 11 ms after a frame arrives. From 
 the camera to the frame arriving: 154-163 ms median in three runs of 20-30 flips (10-90%: 146-176 ms), including the
 laptop screen's own delay, so about 140 ms for the camera; the default `latency_ms` is 140.
 
+The 1920x1080 mode (`[camera] mode = "dual1080"`, below): the same flips took 133 ms (about 115 for the camera, the
+default there). Its picture has 615 pixels per radian at the middle of each view and ~820 at +-60 degrees, against
+458 in the 360-degree mode, so a tag stays above the 22 px minimum to 4.5-6 m instead of 3.4 m. With 13 tags on a
+screen in view: decode 2.7 ms against 4.7, detection the same (5.4 ms), and corner directions agreeing with the
+360-degree mode's to 0.18 px median (0.57 max).
+
 ## Hardware
 
 - Raspberry Pi 5 (a Pi 4 should work, slower), 64-bit Raspberry Pi OS or Debian 12+.
 - Insta360 X4 set to **webcam mode** (USB menu on the camera), plugged **straight into the Pi**, not through a hub
   or dock: some docks power it but never pass data. It then shows up as a UVC camera; `x4tags` finds it by its USB
   vendor ID. It may fall back to USB-drive mode; choose webcam mode again on the camera.
-- Use the 2880x1440 360-degree output. (The 1920x1080 mode is two stacked flattened half-panoramas, not this.)
+- The default is the 2880x1440 360-degree output. The X4's other webcam size, 1920x1080, is supported too
+  (`[camera] mode = "dual1080"`): two views stacked, the back above the front, each +-76 degrees across and +-24
+  degrees up and down at its middle. It's sharper and faster, but blind for 28 degrees on each side of the camera
+  and to anything high or low (a tag 1.4 m above the camera is out of view closer than ~3 m). Its geometry isn't
+  published; `x4tags/dual.py` holds a calibration of one X4 (about 0.3 px against held-out measurements).
   Feed the X4 from a supply that can give 5 V 3 A; it heats up when charging and streaming at once.
 
 ## Install on the Pi
@@ -132,7 +142,9 @@ All in `/etc/x4tags.toml`; `config.example.toml` lists every key. The ones to se
 - `[field] layout`: a WPILib AprilTag field layout JSON (the season's file from WPILib) for `field_pose`. Keep
   `min_tags` at 2 or more: a single tag's pose has two nearly equally good fits, metres apart.
 - `[output] nt_server`: your team number (or a host, or `localhost:5810` for a simulator).
-- `[camera] latency_ms`: from `check_latency`. Timestamps are moved back by this much; at 4 m/s every 100 ms
+- `[camera] mode`: `"equirect"` (360 degrees, default) or `"dual1080"` (see Hardware). Turning the camera 45 degrees
+  on the robot puts the 1080 mode's blind gaps on the diagonals.
+- `[camera] latency_ms`: from `check_latency` (`--mode dual1080` for that mode); defaults are one X4's. Timestamps are moved back by this much; at 4 m/s every 100 ms
   unaccounted for is 0.4 m of error.
 - `[detector] min_tag_px`: 22 by default; 16 finds more distant tags for more time. `near_scale = 0` turns the
   close-tag views off (saves ~5 ms per frame on a Pi 5).
@@ -200,6 +212,7 @@ its face, in robot axes), hamming distance and decision margin.
 |---|---|
 | `src/x4tags/capture.py` | `X4Webcam`: find the X4, newest-frame grey capture with decoding in its own thread |
 | `src/x4tags/equirect.py` | pixel <-> direction, flat views of the sphere, how much a tag is bent |
+| `src/x4tags/dual.py` | the same for the 1920x1080 mode: its calibrated model |
 | `src/x4tags/detector.py` | `X4TagDetector`: NAPA + seam + close-tag views + bent-tag refinement + single-tag pose |
 | `src/x4tags/field.py`, `localize.py` | WPILib field layouts; the all-tags field pose |
 | `src/x4tags/mount.py`, `results.py` | camera -> robot frame, per-frame results |
