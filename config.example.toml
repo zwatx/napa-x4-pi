@@ -7,7 +7,7 @@ height = 1440
 fps = 30
 reduce = 1                   # 2 = decode at half size (1440x720): cheaper, halves the range
 reconnect_s = 2.0
-latency_ms = 0.0             # camera -> Pi delay (stitch, encode, USB), subtracted from timestamps; measure it
+latency_ms = 140.0           # camera -> Pi delay (stitch, encode, USB), subtracted from timestamps; measured ~140 on one X4
 
 [detector]
 min_tag_px = 22              # smallest tag side (pixels) NAPA looks for; 16 finds more far tags, costs time

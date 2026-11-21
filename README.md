@@ -54,11 +54,13 @@ NAPA's default minimum, at 3.4 m, and 16 px at 4.7 m. On the rendered frames, NA
 Raspberry Pi 5, the service on those frames as quality-90 JPEGs paced at 30 fps, one detector thread: 30.0 fps;
 decode 17.8 ms; detection 14.7 ms (95th percentile 22.9); frame age when results are published 34 ms (95th
 percentile 46); 59 C, no throttling. In the room with 11 tags in view and the field pose on: detection plus field
-pose 15.7 ms, frame age 29 ms. The X4's own delay (stitching, encoding, USB) comes on top; measure it (below).
+pose 15.7 ms, frame age 29 ms. The X4's own delay (stitching, encoding, USB) comes on top: about 140 ms (below).
 
 The live X4 (on a laptop): 29.3 fps from the driver, unevenly (about 5 gaps of over 50 ms a second, whatever the
 buffer count); about 216 kB per frame, baseline 4:2:0 JPEG with no restart markers (so no decoding part of a
-frame). Grey decode 8.6 ms, results published 11 ms after a frame arrives.
+frame). Grey decode 8.6 ms, results published 11 ms after a frame arrives. From something changing in front of
+the camera to the frame arriving: 154-163 ms median in three runs of 20-30 flips (10-90%: 146-176 ms), including the
+laptop screen's own delay, so about 140 ms for the camera; the default `latency_ms` is 140.
 
 ## Hardware
 
@@ -112,7 +114,9 @@ X4 plugged into a computer with a screen (any Linux machine with this installed)
 
 2. **How late are frames?** Open the page it serves in a browser on the same computer, full screen, and point the X4
    at the screen; it flips a tag's ID and times how long the change takes to arrive. That includes the screen's own
-   delay (typically 17-50 ms), so it's an upper bound. Put the median in `[camera] latency_ms`.
+   delay (typically 17-50 ms), so it's an upper bound: put the median, less your screen's delay, in
+   `[camera] latency_ms` (one X4 measured ~140 ms, the default). Dismiss any browser or system pop-ups first:
+   one over the tag stops it being seen.
 
    ```sh
    .venv/bin/python -m x4tags.check_latency          # then open http://localhost:8765
@@ -230,8 +234,7 @@ seam keeps its quad whole, so a corner's column can be below 0 or past the width
 
 ## Not done yet
 
-- Run against a live X4 on a laptop (capture, timing, stabilization), not yet on a Pi; its latency is still to
-  measure. Values sent before NetworkTables has synchronised its clock with the robot may carry the Pi's own time
+- Run against a live X4 on a laptop (capture, timing, stabilization, latency), not yet on a Pi. Values sent before NetworkTables has synchronised its clock with the robot may carry the Pi's own time
   base; check timestamps on a real robot.
 - Range is short (see Measured); distant tags need a narrower camera.
 - The stitch is from two lenses about 3 cm apart, and the X4 stitches in the camera; close tags on a stitch line can

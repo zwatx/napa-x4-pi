@@ -19,7 +19,7 @@ class CameraConfig:
     reconnect_s: float = 2.0  # wait between attempts when the camera is missing or stalls
     # Time from the camera taking a frame to the frame arriving here (stitch, encode, USB). Subtracted from every
     # timestamp. Unknown until measured on your setup (e.g. film a running stopwatch); 0 assumes none.
-    latency_ms: float = 0.0
+    latency_ms: float = 140.0  # measured on one X4 (check_latency: 154-163 ms, less ~20 ms of screen delay)
 
 
 @dataclass
