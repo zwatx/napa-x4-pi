@@ -60,7 +60,8 @@ class NetworkTablesPublisher(Publisher):
     - ``field_pose`` (double[]): with a field layout, the pose from all tags together, 13 values: robot x, y, z (m),
       roll, pitch, yaw (deg), camera x, y, z (m), rms_px, tag count, xy_std_m, yaw_std_deg (the expected position
       and heading error, for a pose estimator's standard deviations); empty when there's no solution. The robot
-      values assume the picture is fixed to the camera body; the camera position holds either way.
+      values use the picture's heading, which lags the body by a few degrees after quick turns; the camera
+      position holds either way (use it with the gyro's heading).
     - ``frame`` (int), ``age_ms``, ``decode_ms``, ``detect_ms`` (double), ``camera_connected`` (boolean).
 
     Every value of a frame carries the frame's capture time (``camera.latency_ms`` before it arrived) as its NT

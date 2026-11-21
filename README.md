@@ -56,6 +56,10 @@ decode 17.8 ms; detection 14.7 ms (95th percentile 22.9); frame age when results
 percentile 46); 59 C, no throttling. In the room with 11 tags in view and the field pose on: detection plus field
 pose 15.7 ms, frame age 29 ms. The X4's own delay (stitching, encoding, USB) comes on top; measure it (below).
 
+The live X4 (on a laptop): 29.3 fps from the driver, unevenly (about 5 gaps of over 50 ms a second, whatever the
+buffer count); about 216 kB per frame, baseline 4:2:0 JPEG with no restart markers (so no decoding part of a
+frame). Grey decode 8.6 ms, results published 11 ms after a frame arrives.
+
 ## Hardware
 
 - Raspberry Pi 5 (a Pi 4 should work, slower), 64-bit Raspberry Pi OS or Debian 12+.
@@ -87,20 +91,24 @@ Try it by hand first:
 Two things about the X4 aren't published anywhere and decide how far to trust the output. Check both once, with the
 X4 plugged into a computer with a screen (any Linux machine with this installed):
 
-1. **Is the picture fixed to the camera body?** Insta360 says the X4 stitches and *stabilizes* its 360-degree webcam
-   output in the camera, and that camera settings (stabilization included) can't be changed in webcam mode. If the
-   picture's heading doesn't follow the body exactly, bearings, the robot heading from the field pose, and the robot
-   position (which goes through the mount offset with that heading) are wrong while turning. The *camera's*
-   position isn't: the picture turns about the lens, which doesn't move it.
+1. **Does the picture follow the camera body?** Insta360 says the X4 stitches and *stabilizes* its 360-degree
+   webcam output in the camera, and webcam mode has no settings to turn that off. Measured on one X4 (2026-11): the
+   picture follows quick turns within about half a second, but the last few degrees (3-8 after a quick hand turn)
+   come back slowly, with a ~5 s time constant. A camera at rest gives a still picture (under 0.002 degrees of drift
+   in 15 s). So for 10-20 s after the robot turns, everything that depends on the picture's heading is a few
+   degrees off: bearings to tags, the robot heading from `field_pose`, and (through the mount offset) its robot
+   position. The *camera's* position isn't affected: the picture turns about the lens.
+
+   Take heading from the robot's gyro and use `field_pose`'s camera position with it
+   (`x4tags.localize.robot_position_from_heading` shows the arithmetic); to aim at a tag, work from field positions
+   rather than the raw bearing. To check your camera (firmware may change this), no tag needed:
 
    ```sh
-   .venv/bin/python -m x4tags.check_stabilization --tilt   # keep a tag in front; turn, then tilt, when told
+   .venv/bin/python -m x4tags.check_stabilization --tilt   # turn it, let go; then tilt it, let go, when told
    ```
 
-   It reports *body-fixed* (all outputs valid), *smoothed* (lags while turning) or *heading-* / *horizon-locked*
-   for the turn and the tilt. If it isn't body-fixed, take heading from the robot's gyro and use `field_pose`'s
-   camera position: `x4tags.localize.robot_position_from_heading` shows the arithmetic. If the horizon is locked,
-   leave `[mount]` pitch and roll at 0.
+   It reports *body-fixed*, *follows ... but creeps* (with how far and how slowly), or *heading-* /
+   *horizon-locked*. If the horizon is locked, leave `[mount]` pitch and roll at 0.
 
 2. **How late are frames?** Open the page it serves in a browser on the same computer, full screen, and point the X4
    at the screen; it flips a tag's ID and times how long the change takes to arrive. That includes the screen's own
@@ -138,8 +146,9 @@ NetworkTables 4, table `/x4tags` (rename with `nt_table`):
 
 Yaw (left of robot forward) and pitch (above horizontal) are the direction of each tag's centre from the camera, in
 robot axes. `x_m, y_m, z_m` is the tag's centre in the robot frame; distance and position are NaN without
-`tags.size_m` or when the pose fits poorly. All of a frame's tags are in one array so they can't be mixed with
-another frame's, and every value is timestamped with when the frame was taken. In Java:
+`tags.size_m` or when the pose fits poorly. Bearings go through the picture's heading, so they too lag a few
+degrees after quick turns. All of a frame's tags are in one array so they can't be mixed with another frame's, and
+every value is timestamped with when the frame was taken. In Java:
 
 ```java
 DoubleArraySubscriber sub = NetworkTableInstance.getDefault().getTable("x4tags")
@@ -154,10 +163,28 @@ for (int i = 0; i + 7 <= latest.value.length; i += 7) {
 }
 ```
 
-`field_pose` reads the same way (13 values); feed robot x, y and yaw to a pose estimator with `takenSeconds` and
-standard deviations `xy_std_m` and `yaw_std_deg` (in radians). Those come from the fit's geometry and an assumed
-corner error (`corner_noise_px`): two small, distant tags in nearly the same direction can fit well and still be
-10-20 cm out, and they say so (typical well-spread poses: 2-3 cm).
+`field_pose` reads the same way (13 values). The X4's picture lags its body by a few degrees after quick turns
+(see *Before relying on it*), so don't use its yaw as a heading measurement: take the camera's x, y (values 6 and
+7), and the robot's position from them with the gyro's heading at `takenSeconds`:
+
+```java
+TimestampedDoubleArray pose = poseSub.getAtomic();          // poseSub: the field_pose topic, subscribed like tags
+double[] v = pose.value;
+double takenSeconds = pose.serverTime / 1e6;
+if (v.length == 13) {
+    Rotation2d heading = poseEstimator.sampleAt(takenSeconds)   // gyro-based heading when the frame was taken
+        .map(Pose2d::getRotation).orElse(poseEstimator.getEstimatedPosition().getRotation());
+    Translation2d mount = new Translation2d(MOUNT_X_M, MOUNT_Y_M);   // the [mount] x_m, y_m
+    Translation2d robot = new Translation2d(v[6], v[7]).minus(mount.rotateBy(heading));
+    poseEstimator.addVisionMeasurement(new Pose2d(robot, heading), takenSeconds,
+        VecBuilder.fill(v[11], v[11], Double.POSITIVE_INFINITY));   // xy_std_m; heading from the gyro only
+}
+```
+
+`xy_std_m` and `yaw_std_deg` come from the fit's geometry and an assumed corner error (`corner_noise_px`): two
+small, distant tags in nearly the same direction can fit well and still be 10-20 cm out, and they say so (typical
+well-spread poses: 2-3 cm). The robot x, y, z in values 0-2 go through the picture's heading: with the camera
+0.3 m from the robot's centre, a 5 degree lag moves them 2.6 cm.
 
 UDP and stdout carry one JSON object per frame with all of that plus each tag's corners (pixels in the stitched
 frame), full pose rotation (columns: the tag's axes towards its printed left edge, its printed bottom, and out of
@@ -203,9 +230,9 @@ seam keeps its quad whole, so a corner's column can be below 0 or past the width
 
 ## Not done yet
 
-- Not yet run against a live X4 on a Pi: capture, latency and stabilization need the checks above. Values sent
-  before NetworkTables has synchronised its clock with the robot may carry the Pi's own time base; check timestamps
-  on a real robot.
+- Run against a live X4 on a laptop (capture, timing, stabilization), not yet on a Pi; its latency is still to
+  measure. Values sent before NetworkTables has synchronised its clock with the robot may carry the Pi's own time
+  base; check timestamps on a real robot.
 - Range is short (see Measured); distant tags need a narrower camera.
 - The stitch is from two lenses about 3 cm apart, and the X4 stitches in the camera; close tags on a stitch line can
   be slightly misplaced, which the rendered tests don't model.

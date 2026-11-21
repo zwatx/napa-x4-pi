@@ -4,10 +4,11 @@ A 360-degree camera sees tags all around, which pins its position down far bette
 fits one camera pose to the directions of all tag corners (angles on the sphere, so it works across the whole
 picture, where a pinhole camera model can't). It starts from each tag's own pose and keeps the best fit.
 
-Position comes out right even if the X4 rotates its picture (it stabilizes webcam output in the camera): the
-picture turns about the lens centre, which doesn't move it. The solved rotation is the picture's, so robot heading
-from it is only right if the picture stays fixed to the camera body; otherwise take heading from the robot's gyro
-and use ``camera_position`` (see ``robot_position_from_heading``).
+Position comes out right even though the X4 rotates its picture (it stabilizes webcam output in the camera): the
+picture turns about the lens centre, which doesn't move it. The solved rotation is the picture's, which lags the
+body by a few degrees for several seconds after a quick turn (measured: 3-8 degrees, ~5 s time constant; see
+``check_stabilization``), so take heading from the robot's gyro and use ``camera_position`` with it (see
+``robot_position_from_heading``).
 """
 
 from __future__ import annotations
