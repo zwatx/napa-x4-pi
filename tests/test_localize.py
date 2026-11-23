@@ -105,3 +105,65 @@ def test_a_misread_tag_never_yields_a_wrong_pose():
         if pose is not None:
             assert bad.tag_id not in pose.tag_ids
             assert np.linalg.norm(pose.robot_position - p_r) < 0.05
+
+
+def _noisy_tags(layout, r_fc, c, sigma_px, rng, max_m=6.0):
+    """Tags with their exact corner directions plus Gaussian corner noise (``sigma_px`` across each ray)."""
+    from x4tags.detector import X4Tag
+    from x4tags.equirect import tangent_bases
+
+    out = []
+    for tag in layout.tags.values():
+        to_cam = c - tag.position
+        if tag.rotation[:, 0] @ to_cam <= 0.3 * np.linalg.norm(to_cam) or np.linalg.norm(to_cam) > max_m:
+            continue
+        v = (tag.corners(SIZE) - c) @ r_fc
+        u = v / np.linalg.norm(v, axis=1, keepdims=True)
+        u = u + np.einsum("kij,ki->kj", tangent_bases(u)[:, :2], rng.normal(0, sigma_px * np.pi / 1440, (4, 2)))
+        out.append(X4Tag(tag.tag_id, np.zeros((4, 2)), u / np.linalg.norm(u, axis=1, keepdims=True), 0, 100.0, 0.0,
+                         False, False))
+    return out
+
+
+@pytest.mark.parametrize("n_tags", [2, None])
+def test_covariances_match_the_errors(n_tags):
+    """With Gaussian corner noise of the assumed size, about 5% of errors fall outside the published covariances'
+    95% ellipses: the robot's (x, y, yaw) and the camera's (x, y). Two tags alone are the hard case (see
+    ``FieldLocalizer._covariance``)."""
+    layout = FieldLayout.from_dict(room_layout())
+    mount = Mount(x_m=0.15, y_m=-0.05, z_m=0.55, yaw_deg=90)
+    loc = FieldLocalizer(layout, SIZE, mount, max_xy_std_m=10)
+    rng = np.random.default_rng(3)
+    robot_nees, camera_nees = [], []
+    for _ in range(120):
+        p_r, yaw = np.array([rng.uniform(0.6, 5.4), rng.uniform(0.6, 3.4), 0.0]), rng.uniform(-np.pi, np.pi)
+        r_fr = rotation_rpy(0, 0, yaw)
+        r_fc, c = r_fr @ mount.rotation, p_r + r_fr @ mount.translation
+        tags = _noisy_tags(layout, r_fc, c, loc.corner_noise_px, rng)[:n_tags]
+        pose = loc.solve(tags) if len(tags) >= 2 else None
+        if pose is None:
+            continue
+        robot_yaw = matrix_to_rpy(pose.robot_rotation)[2]
+        e = np.array([*(p_r - pose.robot_position)[:2], (yaw - robot_yaw + np.pi) % (2 * np.pi) - np.pi])
+        robot_nees.append(e @ np.linalg.solve(pose.robot_covariance, e))
+        e = (c - pose.camera_position)[:2]
+        camera_nees.append(e @ np.linalg.solve(pose.camera_xy_covariance, e))
+        np.testing.assert_allclose(pose.robot_covariance, pose.robot_covariance.T, atol=1e-15)
+        np.testing.assert_allclose(np.hypot(*pose.gyro_std_devs()) ** 2, np.trace(pose.camera_xy_covariance))
+    assert len(robot_nees) > 100
+    assert np.mean(np.array(robot_nees) > 7.81) < 0.10  # chi-squared, 3 dof, 95%
+    assert np.mean(np.array(camera_nees) > 5.99) < 0.10  # 2 dof
+    assert 1.5 < np.mean(robot_nees) < 4.5 and 1.0 < np.mean(camera_nees) < 3.0
+
+
+def test_field_pose_packs_for_networktables():
+    from x4tags.publish import FIELD_POSE_FIELDS, field_pose_values
+
+    layout, mount, p_r, tags = _scene((2.4, 1.7), 30.0)
+    pose = FieldLocalizer(layout, SIZE, mount).solve(tags)
+    v = field_pose_values(pose)
+    assert len(v) == len(FIELD_POSE_FIELDS) == 28 and np.all(np.isfinite(v))
+    np.testing.assert_allclose(np.reshape(v[13:22], (3, 3)), pose.robot_covariance)
+    assert v[11] == pose.xy_std_m and max(v[26:28]) <= pose.xy_std_m + 1e-12  # no direction worse than the worst
+    d = pose.to_dict()
+    assert np.shape(d["robot_covariance"]) == (3, 3) and len(d["gyro_std_devs_m"]) == 2

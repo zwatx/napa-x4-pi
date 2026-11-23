@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from napa_vision import PoseWithCovariance
+from napa_vision.covariance import cap_correlations
 
 from .detector import X4Tag, X4TagDetector
 from .equirect import tangent_bases
@@ -31,19 +33,39 @@ class FieldPose:
     robot_rotation: np.ndarray  # robot axes as columns in field axes (same assumption)
     rms_px: float  # corner direction error, in pixels at the frame's scale
     tag_ids: list[int]
-    xy_std_m: float = float("nan")  # expected position error across the field (largest direction), from the geometry
+    xy_std_m: float = float("nan")  # expected camera position error, in its least certain direction
     yaw_std_deg: float = float("nan")  # expected heading error
     covariance: np.ndarray | None = None  # 6x6: field-frame rotation (rad) then camera position (m)
+    robot_covariance: np.ndarray | None = None  # 3x3: robot (x, y, yaw) on the field, m and rad
+    camera_xy_covariance: np.ndarray | None = None  # 2x2: camera (x, y) on the field, m
 
     @property
     def robot_rpy_deg(self) -> tuple[float, float, float]:
         return tuple(float(np.degrees(a)) for a in matrix_to_rpy(self.robot_rotation))
 
+    def gyro_std_devs(self) -> tuple[float, float]:
+        """Standard deviations (m) of the camera's position along the robot's forward and left axes: the x and y
+        standard deviations for WPILib's ``addVisionMeasurement`` when the heading comes from the gyro. Its estimators
+        apply them along the robot's axes, not the field's. The picture's heading is used to turn them; a few degrees
+        of lag changes them very little."""
+        if self.camera_xy_covariance is None:
+            return float("nan"), float("nan")
+        yaw = matrix_to_rpy(self.robot_rotation)[2]
+        c, s = np.cos(yaw), np.sin(yaw)
+        to_robot = np.array([[c, s], [-s, c]])
+        var = np.diag(to_robot @ self.camera_xy_covariance @ to_robot.T)
+        return float(np.sqrt(var[0])), float(np.sqrt(var[1]))
+
     def to_dict(self) -> dict:
         roll, pitch, yaw = self.robot_rpy_deg
-        return {"robot_xyz_m": np.round(self.robot_position, 4).tolist(), "robot_rpy_deg": [round(roll, 3), round(pitch, 3), round(yaw, 3)],
-                "camera_xyz_m": np.round(self.camera_position, 4).tolist(), "rms_px": round(self.rms_px, 3), "tags": self.tag_ids,
-                "xy_std_m": round(self.xy_std_m, 4), "yaw_std_deg": round(self.yaw_std_deg, 3)}
+        d = {"robot_xyz_m": np.round(self.robot_position, 4).tolist(), "robot_rpy_deg": [round(roll, 3), round(pitch, 3), round(yaw, 3)],
+             "camera_xyz_m": np.round(self.camera_position, 4).tolist(), "rms_px": round(self.rms_px, 3), "tags": self.tag_ids,
+             "xy_std_m": round(self.xy_std_m, 4), "yaw_std_deg": round(self.yaw_std_deg, 3)}
+        if self.robot_covariance is not None:
+            d["robot_covariance"] = [[float(f"{x:.6g}") for x in row] for row in self.robot_covariance]
+            d["camera_xy_covariance"] = [[float(f"{x:.6g}") for x in row] for row in self.camera_xy_covariance]
+            d["gyro_std_devs_m"] = [round(x, 5) for x in self.gyro_std_devs()]
+        return d
 
 
 def robot_position_from_heading(camera_position: np.ndarray, robot_yaw_rad: float, mount: Mount) -> np.ndarray:
@@ -69,8 +91,8 @@ class FieldLocalizer:
     ``max_rms_px``: a pose is accepted only if every tag's corners fit within this (pixels of the frame). When some
     don't, each tag is left out in turn (up to 8 tags) and the best fit without it is kept, if it still has
     ``min_tags`` tags and all of them fit: one misread or misplaced tag can't pull the pose, or hide in it.
-    ``corner_noise_px``: assumed corner error, for the pose's expected error (``xy_std_m``, ``yaw_std_deg``). A good
-    fit can still be weak, e.g. two small, distant tags in nearly the same direction: these say how much to trust it.
+    ``corner_noise_px``: assumed corner error, for the pose's covariances and expected errors. A good fit can still be
+    weak, e.g. two small, distant tags in nearly the same direction: these say how much to trust it.
     ``max_xy_std_m``: give no pose when the expected position error is larger than this.
     """
 
@@ -114,12 +136,18 @@ class FieldLocalizer:
             return None
         r_rc = self.mount.rotation  # camera axes in robot axes
         r_fr = r_fc @ r_rc.T
+        robot = self._robot_pose2d(r_fc, c, cov)
         return FieldPose(c, r_fc, c - r_fr @ self.mount.translation, r_fr, rms * self.px_per_rad, [t.tag_id for t in tags],
-                         xy_std, float(np.degrees(np.sqrt(cov[2, 2]))), cov)
+                         xy_std, float(np.degrees(np.sqrt(cov[2, 2]))), cov, robot.covariance, cov[3:5, 3:5].copy())
 
     def _covariance(self, r_fc, jac):
         """6x6 covariance of (field-frame rotation, camera position) for ``corner_noise_px`` of corner noise, from
-        the fit's Jacobian (rotation updates there are in camera axes: rotated into field axes here)."""
+        the fit's Jacobian (rotation updates there are in camera axes: rotated into field axes here).
+
+        Correlations are capped as NAPA caps its own (``napa_vision.covariance.cap_correlations``): from two tags the
+        linearized covariance is too sure of some combinations of axes. In a Monte Carlo of the test room (Gaussian
+        corner noise, 400 poses per case), 11-28% of two-tag robot (x, y, yaw) errors fell outside the 95% ellipse
+        without the cap and 4-5% with it; with every tag in view, 5-6% without and 4-5% with."""
         sigma = self.corner_noise_px / self.px_per_rad
         try:
             cov = np.linalg.inv(jac.T @ jac) * sigma * sigma
@@ -127,8 +155,19 @@ class FieldLocalizer:
             return None
         t = np.zeros((6, 6))
         t[:3, :3], t[3:, 3:] = r_fc, np.eye(3)
-        cov = t @ cov @ t.T
+        cov = cap_correlations(t @ cov @ t.T)
         return cov if np.all(np.isfinite(cov)) else None
+
+    def _robot_pose2d(self, r_fc, c, cov):
+        """The robot's (x, y, yaw) and its 3x3 covariance, through the mount, with NAPA's pose types (which order
+        position before rotation, both in the field frame: the same convention as ``cov``, reordered)."""
+        camera = np.eye(4)
+        camera[:3, :3], camera[:3, 3] = r_fc, c
+        r_rc, t_rc = self.mount.rotation, self.mount.translation
+        camera_to_robot = np.eye(4)
+        camera_to_robot[:3, :3], camera_to_robot[:3, 3] = r_rc.T, -r_rc.T @ t_rc
+        napa_cov = np.block([[cov[3:, 3:], cov[3:, :3]], [cov[:3, 3:], cov[:3, :3]]])
+        return PoseWithCovariance(camera, napa_cov).transform_by(camera_to_robot).to_pose2d()
 
     # -- internals
     def _solve(self, tags):

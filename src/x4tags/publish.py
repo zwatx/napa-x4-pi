@@ -8,6 +8,8 @@ import socket
 import sys
 import time
 
+import numpy as np
+
 from .results import FrameResult
 
 log = logging.getLogger(__name__)
@@ -49,6 +51,11 @@ class UdpPublisher(Publisher):
 
 
 TAG_FIELDS = ("id", "yaw_deg", "pitch_deg", "distance_m", "x_m", "y_m", "z_m")
+FIELD_POSE_FIELDS = ("robot_x_m", "robot_y_m", "robot_z_m", "roll_deg", "pitch_deg", "yaw_deg", "camera_x_m", "camera_y_m",
+                     "camera_z_m", "rms_px", "tag_count", "xy_std_m", "yaw_std_deg",
+                     *(f"robot_cov_{a}_{b}" for a in ("x", "y", "yaw") for b in ("x", "y", "yaw")),
+                     *(f"camera_cov_{a}_{b}" for a in ("x", "y") for b in ("x", "y")),
+                     "gyro_std_forward_m", "gyro_std_left_m")
 
 
 class NetworkTablesPublisher(Publisher):
@@ -57,11 +64,14 @@ class NetworkTablesPublisher(Publisher):
     - ``tags`` (double[]): every tag of a frame packed in one array, ``len(TAG_FIELDS)`` = 7 values per tag:
       id, yaw_deg, pitch_deg, distance_m, x_m, y_m, z_m (robot frame; distance and position NaN without a pose).
       One array, so a reader never mixes one frame's IDs with another frame's bearings.
-    - ``field_pose`` (double[]): with a field layout, the pose from all tags together, 13 values: robot x, y, z (m),
-      roll, pitch, yaw (deg), camera x, y, z (m), rms_px, tag count, xy_std_m, yaw_std_deg (the expected position
-      and heading error, for a pose estimator's standard deviations); empty when there's no solution. The robot
-      values use the picture's heading, which lags the body by a few degrees after quick turns; the camera
-      position holds either way (use it with the gyro's heading).
+    - ``field_pose`` (double[]): with a field layout, the pose from all tags together, 28 values (``FIELD_POSE_FIELDS``):
+      0-2 robot x, y, z (m); 3-5 roll, pitch, yaw (deg); 6-8 camera x, y, z (m); 9 rms_px; 10 tag count;
+      11 xy_std_m, 12 yaw_std_deg (expected position and heading error); 13-21 the robot (x, y, yaw) covariance,
+      3x3 row by row, field axes, m and rad; 22-25 the camera (x, y) covariance, 2x2 row by row, m; 26-27 the
+      camera position's standard deviations along the robot's forward and left axes (m), for WPILib's
+      ``addVisionMeasurement`` with the gyro's heading. Empty when there's no solution. The robot values use the
+      picture's heading, which lags the body by a few degrees after quick turns; the camera position holds either
+      way (use it with the gyro's heading).
     - ``frame`` (int), ``age_ms``, ``decode_ms``, ``detect_ms`` (double), ``camera_connected`` (boolean).
 
     Every value of a frame carries the frame's capture time (``camera.latency_ms`` before it arrived) as its NT
@@ -102,8 +112,7 @@ class NetworkTablesPublisher(Publisher):
         if fp is None:
             self.field_pose.set([], stamp)
         else:
-            self.field_pose.set([*map(float, fp.robot_position), *fp.robot_rpy_deg, *map(float, fp.camera_position),
-                                 fp.rms_px, float(len(fp.tag_ids)), fp.xy_std_m, fp.yaw_std_deg], stamp)
+            self.field_pose.set(field_pose_values(fp), stamp)
         self.frame.set(frame.seq, stamp)
         self.timings["age_ms"].set((now - frame.capture_time) * 1e3, stamp)
         self.timings["decode_ms"].set(frame.decode_ms, stamp)
@@ -120,6 +129,16 @@ class NetworkTablesPublisher(Publisher):
     def close(self):
         self.inst.stopClient()
         type(self.inst).destroy(self.inst)
+
+
+def field_pose_values(fp) -> list[float]:
+    """``fp`` packed for NetworkTables, in ``FIELD_POSE_FIELDS`` order (NaN for covariances it doesn't have)."""
+    nan = float("nan")
+    robot_cov = np.full(9, nan) if fp.robot_covariance is None else np.ravel(fp.robot_covariance)
+    camera_cov = np.full(4, nan) if fp.camera_xy_covariance is None else np.ravel(fp.camera_xy_covariance)
+    return [*map(float, fp.robot_position), *fp.robot_rpy_deg, *map(float, fp.camera_position), fp.rms_px,
+            float(len(fp.tag_ids)), fp.xy_std_m, fp.yaw_std_deg, *map(float, robot_cov), *map(float, camera_cov),
+            *fp.gyro_std_devs()]
 
 
 def make_publishers(out) -> list[Publisher]:
