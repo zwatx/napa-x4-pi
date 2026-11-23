@@ -144,10 +144,10 @@ class FieldLocalizer:
         """6x6 covariance of (field-frame rotation, camera position) for ``corner_noise_px`` of corner noise, from
         the fit's Jacobian (rotation updates there are in camera axes: rotated into field axes here).
 
-        Correlations are capped as NAPA caps its own (``napa_vision.covariance.cap_correlations``): from two tags the
-        linearized covariance is too sure of some combinations of axes. In a Monte Carlo of the test room (Gaussian
-        corner noise, 400 poses per case), 11-28% of two-tag robot (x, y, yaw) errors fell outside the 95% ellipse
-        without the cap and 4-5% with it; with every tag in view, 5-6% without and 4-5% with."""
+        Correlations are capped with ``napa_vision.covariance.cap_correlations``, here in the field frame: from two tags
+        the linearized covariance is too sure of some combinations of axes. In a Monte Carlo of the test room
+        (Gaussian corner noise, 400 poses per case), 11-28% of two-tag robot (x, y, yaw) errors fell outside the 95%
+        ellipse without the cap and 3.5-5.5% with it; with every tag in view, 5-6% without and 3.5-4.5% with."""
         sigma = self.corner_noise_px / self.px_per_rad
         try:
             cov = np.linalg.inv(jac.T @ jac) * sigma * sigma

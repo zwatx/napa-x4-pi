@@ -167,3 +167,23 @@ def test_field_pose_packs_for_networktables():
     assert v[11] == pose.xy_std_m and max(v[26:28]) <= pose.xy_std_m + 1e-12  # no direction worse than the worst
     d = pose.to_dict()
     assert np.shape(d["robot_covariance"]) == (3, 3) and len(d["gyro_std_devs_m"]) == 2
+
+
+def test_gyro_std_devs_turn_into_robot_axes():
+    """A camera position uncertain along the field's (1, 1) diagonal and well known across it: a robot facing along
+    that diagonal (yaw 45 degrees) is uncertain forward; facing the other diagonal (yaw -45), to its left."""
+    from x4tags.localize import FieldPose
+    from x4tags.publish import field_pose_values
+
+    d = np.array([[1, -1], [1, 1]]) / np.sqrt(2)  # columns: the (1, 1) and (-1, 1) diagonals
+    cov = d @ np.diag([0.05**2, 0.01**2]) @ d.T
+
+    def pose(yaw_deg):
+        r = rotation_rpy(0, 0, math.radians(yaw_deg))
+        return FieldPose(np.zeros(3), r, np.zeros(3), r, 0.1, [1, 2], camera_xy_covariance=cov)
+
+    assert pose(45).gyro_std_devs() == pytest.approx((0.05, 0.01))
+    assert pose(-45).gyro_std_devs() == pytest.approx((0.01, 0.05))
+    p = pose(45)
+    np.testing.assert_allclose(field_pose_values(p)[22:26], np.ravel(cov))
+    assert np.isnan(field_pose_values(p)[13:22]).all()  # no robot covariance given
