@@ -68,6 +68,16 @@ From a change in front of the camera to its frame arriving took 154-163 ms media
 flips (146-176 ms from the 10th to the 90th percentile). That includes the laptop screen's own delay, which leaves
 about 140 ms for the camera. The default `latency_ms` is 140.
 
+**The live X4, on a Pi 5.** Plugged into the Pi (USB 2 is enough), with four printed tags taped around a room 1-4 m
+away, `min_tag_px = 16` and the field pose on, the service ran at 28.4 fps in the 360-degree mode. Decoding took
+9.5 ms, detection plus the field pose 18.6 ms (with a fifth tag in view that never fits, which the field pose has to
+leave out every frame), and results went out about 28 ms after a frame arrived, using 24% of the four cores at 50 C.
+The 1080 mode ran at 29.7 fps: 6.5 ms decoding, 10.9 ms detection plus the field pose, 13% of the cores. With the
+camera still, the field pose's position wandered by about 1 mm (standard deviation) from four tags and 4.5 mm from
+the two the 1080 mode sees, well inside the published 5 mm and 45 mm. Over 4,200 frames of the room with no tags in
+it, nothing was reported. On a practice field, three tags on a board whose centres are marked 17 1/4 in apart, seen
+from 1.3 m in the 1080 mode, came out 17.45 and 17.25 in apart.
+
 **The 1920x1080 mode** (`[camera] mode = "dual1080"`, see [Hardware](#hardware)). The same screen flips took 133 ms,
 about 115 ms for the camera, which is that mode's default. Its picture has 615 px per radian at the middle of each
 view and about 820 at 60 degrees to either side, against 458 in the 360-degree mode. A tag stays above the 16 px
