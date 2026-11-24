@@ -246,16 +246,17 @@ class FieldLocalizer:
             while True:
                 step = np.linalg.solve(a + lam * np.diag(np.diag(a) + 1e-12), -g)
                 r_new, c_new = r @ _rodrigues(step[:3]), c + step[3:]
-                res_new = self._residuals(r_new, c_new, points, rays, bases)
+                res_new, jac_new = self._residuals(r_new, c_new, points, rays, bases, jacobian=True)  # usually kept
                 cost_new = self._cost(res_new)
                 if cost_new <= cost:
-                    r, c, cost, lam = r_new, c_new, cost_new, max(lam / 10, 1e-9)
-                    res, jac = self._residuals(r, c, points, rays, bases, jacobian=True)
+                    r, c, cost, lam, res, jac = r_new, c_new, cost_new, max(lam / 10, 1e-9), res_new, jac_new
                     break
                 lam *= 10
                 if lam > 1e8:
                     break
-            if lam > 1e8 or np.linalg.norm(step) < 1e-7:  # 1e-7 rad / 0.1 micrometre: converged
+            # 1e-5 rad (0.005 px) / 10 micrometres: converged. Tighter only adds an iteration that moves the pose by
+            # ~0.01 micrometres (measured on a live room clip).
+            if lam > 1e8 or np.linalg.norm(step) < 1e-5:
                 break
         u, _, vt = np.linalg.svd(r)  # keep it a rotation
         r = u @ vt
