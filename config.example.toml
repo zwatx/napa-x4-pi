@@ -13,7 +13,7 @@ reconnect_s = 2.0
                              # on one X4, 140 for "equirect" and 115 for "dual1080"; check yours with check_latency
 
 [detector]
-min_tag_px = 22              # smallest tag side (pixels) NAPA looks for; 16 finds more far tags, costs time
+min_tag_px = 16              # smallest tag side (pixels) NAPA looks for; 22 (NAPA's default) misses far tags
 threads = 1                  # NAPA threads per frame; 4 saves only ~1 ms on a Pi 5 (JPEG decode dominates)
 refine_bow_px = 0.2          # refine tags the 360 frame bends more than this ("none" = never)
 seam_px = 192                # search this far either side of the left/right seam (0 = don't)

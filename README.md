@@ -51,8 +51,9 @@ and 4.3 cm. That's with perfect geometry, an exact stitch and exactly placed tag
 do worse.
 
 **Range.** The 360-degree picture has 458 px per radian, or 0.125 degrees per pixel. A face-on FRC tag (0.1651 m) is
-22 px wide at 3.4 m, which is NAPA's default minimum, and 16 px at 4.7 m. On the rendered frames NAPA found 32% of
-tags at 22-26 px, 54% at 40-56 px and 74% at 80-120 px, through all the blur, glare and tilt in those frames.
+22 px wide at 3.4 m (NAPA's own default minimum) and 16 px at 4.7 m (this service's default). On the rendered
+frames NAPA found 32% of tags at 22-26 px, 54% at 40-56 px and 74% at 80-120 px, through all the blur, glare and tilt
+in those frames.
 
 **Raspberry Pi 5.** The service ran on those frames as quality-90 JPEGs paced at 30 fps, with one detector thread, and
 kept up at 30.0 fps. Decoding took 17.8 ms and detection 14.7 ms (22.9 at the 95th percentile). Results went out
@@ -69,8 +70,8 @@ about 140 ms for the camera. The default `latency_ms` is 140.
 
 **The 1920x1080 mode** (`[camera] mode = "dual1080"`, see [Hardware](#hardware)). The same screen flips took 133 ms,
 about 115 ms for the camera, which is that mode's default. Its picture has 615 px per radian at the middle of each
-view and about 820 at 60 degrees to either side, against 458 in the 360-degree mode. A tag stays above the 22 px
-minimum out to 4.5-6 m instead of 3.4 m. With 13 tags on a screen in view, decoding took 2.7 ms against 4.7,
+view and about 820 at 60 degrees to either side, against 458 in the 360-degree mode. A tag stays above the 16 px
+minimum out to 6.3-8.5 m instead of 4.7 m. With 13 tags on a screen in view, decoding took 2.7 ms against 4.7,
 detection took about 5.4 ms in both, and corner directions agreed with the 360-degree mode's to 0.18 px median and
 0.57 px at worst. On the Pi 5, with the rendered room frames resampled into this layout and the field pose on at
 30 fps:
@@ -168,8 +169,9 @@ Everything lives in `/etc/x4tags.toml`, and `config.example.toml` lists every ke
   the camera 45 degrees on the robot puts the 1080 mode's blind gaps on the diagonals.
 - `[camera] latency_ms` comes from `check_latency`, run with `--mode dual1080` for that mode. The defaults are one
   X4's. Timestamps are moved back by this much, and at 4 m/s every 100 ms not accounted for is 0.4 m of error.
-- `[detector] min_tag_px` is 22 by default. 16 finds more distant tags and takes longer. `near_scale = 0` turns off
-  the close-tag views, which saves about 5 ms per frame on a Pi 5.
+- `[detector] min_tag_px` is 16 by default, below NAPA's own 22: field tags across the room are often 16-22 px in
+  the 360-degree picture. On a Pi 5, 16 adds about 1.2 ms per frame. `near_scale = 0` turns off the close-tag
+  views, which run beside the full-frame search and use about 3 ms of a second core per frame on a Pi 5.
 
 ## What the robot sees
 
@@ -298,7 +300,7 @@ from x4tags import X4Webcam, X4TagDetector
 from x4tags.field import FieldLayout
 from x4tags.localize import FieldLocalizer
 
-det = X4TagDetector(min_tag_px=22)                # other NapaDetector options pass through
+det = X4TagDetector(min_tag_px=16)                # other NapaDetector options pass through
 loc = FieldLocalizer(FieldLayout.load("field.json"), tag_size_m=0.1651)
 with X4Webcam() as cam:
     t, gray = cam.read()                          # newest frame, grey
