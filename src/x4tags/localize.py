@@ -115,19 +115,31 @@ class FieldLocalizer:
         if len(tags) < self.min_tags:
             return None
         limit = self.max_rms_px / self.px_per_rad
+
+        def good(fit):  # seen from the front, and every tag fits
+            return fit is not None and fit[5] and fit[3].max() <= limit
+
         pose = self._solve(tags)
-        if (pose is None or pose[3].max() > limit) and len(tags) > self.min_tags and len(tags) <= 8:
-            best = None  # leave each tag out in turn; keep the best fit in which every remaining tag fits
-            for k in range(len(tags)):
+        if not good(pose) and self.min_tags < len(tags) <= 8:
+            best = None
+            if pose is not None:  # usually one tag is off, and the robust fit leaves it the worst: try without it
+                k = int(np.argmax(pose[3]))
                 rest = tags[:k] + tags[k + 1:]
                 fit = self._solve(rest)
-                if fit is not None and fit[3].max() <= limit and (best is None or fit[2] < best[0][2]):
+                if good(fit):
+                    best = (fit, rest)
+            # Otherwise leave each tag out in turn and keep the best fit in which every remaining tag fits. Each
+            # try is a full solve, so this costs (tags + 1) solves a frame: ~35 ms for 5 tags on a Pi 5.
+            for k in range(len(tags)) if best is None else ():
+                rest = tags[:k] + tags[k + 1:]
+                fit = self._solve(rest)
+                if good(fit) and (best is None or fit[2] < best[0][2]):
                     best = (fit, rest)
             if best is not None:
                 pose, tags = best
-        if pose is None or pose[3].max() > limit:
+        if not good(pose):
             return None
-        r_fc, c, rms, _, jac = pose
+        r_fc, c, rms, _, jac, _ = pose
         cov = self._covariance(r_fc, jac)
         if cov is None:
             return None
@@ -186,12 +198,11 @@ class FieldLocalizer:
             return None
         r, c, rms, res = best
         # Every corner must be seen the way the fit says it is, not from behind (a mirror solution can fit the
-        # directions with every one pointing backwards).
+        # directions with every one pointing backwards). A fit that fails this still says which tags fit worst.
         v = (points - c) @ r
-        if np.min(np.sum(v / np.linalg.norm(v, axis=1, keepdims=True) * rays, 1)) < np.cos(np.radians(5.0)):
-            return None
+        seen = bool(np.min(np.sum(v / np.linalg.norm(v, axis=1, keepdims=True) * rays, 1)) >= np.cos(np.radians(5.0)))
         per_tag = np.sqrt((res.reshape(len(tags), 4, 2) ** 2).sum(2).mean(1))
-        return r, c, rms, per_tag, self._residuals(r, c, points, rays, bases, jacobian=True)[1]
+        return r, c, rms, per_tag, self._residuals(r, c, points, rays, bases, jacobian=True)[1], seen
 
     def _starts(self, tags):
         """Camera poses from each tag's own pose (largest tags first, by angle: the most reliable)."""

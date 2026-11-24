@@ -107,6 +107,25 @@ def test_a_misread_tag_never_yields_a_wrong_pose():
             assert np.linalg.norm(pose.robot_position - p_r) < 0.05
 
 
+def test_a_duplicate_tag_is_dropped_in_two_solves(monkeypatch):
+    """A second sighting of a real tag's ID (the tag on a screen, say) never fits: the pose leaves it out, and finds
+    that by trying the worst-fitting tag first instead of leaving each tag out in turn (one solve per tag a frame)."""
+    import dataclasses
+
+    layout, mount, p_r, tags = _scene((2.4, 1.7), 30.0)
+    tags = sorted(tags, key=lambda t: t.tag_id)[:4]
+    assert len(tags) == 4
+    fake = dataclasses.replace(tags[0], tag_id=tags[1].tag_id)  # tag 0's corners under tag 1's ID
+    loc = FieldLocalizer(layout, SIZE, mount)
+    calls = []
+    solve = loc._solve
+    monkeypatch.setattr(loc, "_solve", lambda ts: calls.append(len(ts)) or solve(ts))
+    pose = loc.solve(tags + [fake])
+    assert pose is not None and sorted(pose.tag_ids) == sorted(t.tag_id for t in tags)
+    assert np.linalg.norm(pose.robot_position - p_r) < 0.02
+    assert calls == [5, 4]
+
+
 def _noisy_tags(layout, r_fc, c, sigma_px, rng, max_m=6.0):
     """Tags with their exact corner directions plus Gaussian corner noise (``sigma_px`` across each ray)."""
     from x4tags.detector import X4Tag
