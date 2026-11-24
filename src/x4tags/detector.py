@@ -16,6 +16,7 @@ runs on the frame, tags across the line between the halves are dropped, and bent
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import cv2
@@ -97,6 +98,9 @@ class X4TagDetector:
         self.mode = mode
         self._dual: DualView | None = None
         self.napa = NapaDetector(**napa_kwargs)
+        self._napa_kwargs = napa_kwargs
+        self._side_napa: NapaDetector | None = None  # the seam and near searches' own detector, on a worker thread
+        self._pool: ThreadPoolExecutor | None = None
         self.refine_bow_px, self.seam_px = refine_bow_px, int(seam_px)
         self.view_margin, self.max_view_px, self.min_view_px = view_margin, int(max_view_px), int(min_view_px)
         self.near_scale, self.near_per_frame = float(near_scale), int(near_per_frame)
@@ -123,11 +127,19 @@ class X4TagDetector:
             return self._detect_dual(gray, width, height)
         if width != 2 * height:
             raise ValueError(f"expected a 2:1 equirectangular frame, got {width}x{height}")
+        side = None
+        if self.seam_px > 0 or self.near_scale > 0:
+            # The seam and near searches don't need the full-frame tags until they are compared with them, so they run
+            # on another core meanwhile, with their own NapaDetector (one per thread; its native call frees the GIL).
+            if self._pool is None:
+                self._side_napa = NapaDetector(**self._napa_kwargs)
+                self._pool = ThreadPoolExecutor(1, thread_name_prefix="x4tags-side")
+            side = self._pool.submit(self._side_search, gray, width, height)
         tags = [self._tag(o, width, height, seam=False) for o in self.napa.detect(gray)]
-        if self.seam_px > 0:
-            tags += self._seam(gray, tags, width, height)
-        if self.near_scale > 0:
-            tags += self._near(gray, tags, width, height)
+        if side is not None:
+            seam, near = side.result()
+            tags += [t for t in seam if not _seen(t, tags, 1.0)]
+            tags += self._keep_near(near, tags)
         if self.refine_bow_px is not None:
             for t in tags:
                 if t.bow_px > self.refine_bow_px:
@@ -164,20 +176,23 @@ class X4TagDetector:
         return X4Tag(int(obs.tag_id), c, rays, obs.hamming, obs.decision_margin, side_bow_px(c, width, height),
                      False, seam)
 
-    def _seam(self, gray, found, width, height):
+    def _side_search(self, gray, width, height):
+        """The seam strip's and the near views' tags, before they are compared with the full-frame search's."""
+        seam = self._seam(gray, width, height) if self.seam_px > 0 else []
+        near = self._near(gray, width, height) if self.near_scale > 0 else []
+        return seam, near
+
+    def _seam(self, gray, width, height):
         s = min(self.seam_px, width // 4)
         strip = np.ascontiguousarray(np.concatenate([gray[:, width - s:], gray[:, :s]], axis=1))
         out = []
-        for o in self.napa.detect(strip):
+        for o in self._side_napa.detect(strip):
             c = np.asarray(o.corners, float).reshape(4, 2)
             if not (c[:, 0].min() < s - 0.5 < c[:, 0].max()):
                 continue  # wholly on one side: the full-frame search has it
             c = c.copy()
             c[:, 0] += width - s  # strip column x is frame column x + W - s (mod W)
-            t = self._tag(o, width, height, seam=True, corners=c)
-            if any(f.tag_id == t.tag_id and float(f.center_ray @ t.center_ray) > np.cos(np.radians(1.0)) for f in found):
-                continue
-            out.append(t)
+            out.append(self._tag(o, width, height, seam=True, corners=c))
         return out
 
     # Straight views for close tags, centred on the 12 vertices of an icosahedron: no direction is more than 37.4
@@ -203,7 +218,8 @@ class X4TagDetector:
             self._near_views[(width, height)] = views
         return views
 
-    def _near(self, gray, found, width, height):
+    def _near(self, gray, width, height):
+        """(view index, tag) for each tag found in this call's near views, in view order."""
         views = self._views(width, height)
         if self.near_per_frame <= 0 or self.near_per_frame >= len(views):
             chosen = list(range(len(views)))
@@ -214,21 +230,29 @@ class X4TagDetector:
                 if i not in chosen:
                     chosen.append(i)
             self._near_next = (self._near_next + self.near_per_frame) % len(views)
-        out, hits = [], set()
-        known = list(found)
+        out = []
         for i in chosen:
             view, m1, m2 = views[i]
-            patch = cv2.remap(gray, m1, m2, cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
-            for o in self.napa.detect(patch):
+            # The maps' columns are already wrapped into the frame, so the border only touches the half pixel at each
+            # edge; replicating it is ~0.6 ms a view faster than BORDER_WRAP on a Pi 5, and these views only find tags
+            # (bent ones are then refined in the full frame, which does wrap).
+            patch = cv2.remap(gray, m1, m2, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+            for o in self._side_napa.detect(patch):
                 rays = view.view_to_ray(np.asarray(o.corners, float).reshape(4, 2))
                 rays /= np.linalg.norm(rays, axis=1, keepdims=True)
                 t = self._tag(o, width, height, seam=False, corners=ray_to_pixel(rays, width, height))
-                if any(f.tag_id == t.tag_id and float(f.center_ray @ t.center_ray) > np.cos(np.radians(2.0)) for f in known):
-                    continue
                 t.near = True
-                out.append(t)
-                known.append(t)
-                hits.add(i)
+                out.append((i, t))
+        return out
+
+    def _keep_near(self, near, found):
+        """The near views' tags that no other search (or earlier near view) found; remembers which views had one."""
+        out, hits = [], set()
+        for i, t in near:
+            if _seen(t, found + out, 2.0):
+                continue
+            out.append(t)
+            hits.add(i)
         self._near_hits = hits
         return out
 
@@ -309,6 +333,12 @@ class X4TagDetector:
             return None
         scale = frame_height / np.pi if px_per_rad is None else px_per_rad
         return best[0], best[1], best[2] * scale  # normalized units -> pixels at the frame's scale
+
+
+def _seen(tag: X4Tag, found: list[X4Tag], within_deg: float) -> bool:
+    """Whether ``found`` has a tag with the same ID within ``within_deg`` of this one's direction."""
+    cos = np.cos(np.radians(within_deg))
+    return any(f.tag_id == tag.tag_id and float(f.center_ray @ tag.center_ray) > cos for f in found)
 
 
 def _bow_px(corners: np.ndarray, rays: np.ndarray, projection: DualView) -> float:
