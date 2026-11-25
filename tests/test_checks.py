@@ -58,7 +58,8 @@ def test_rotation_between_recovers_a_known_rotation():
     img = np.full((h, w), 128, np.uint8)  # random shapes: corners for ORB to match
     for _ in range(400):
         x, y = int(rng.integers(0, w)), int(rng.integers(40, h - 40))
-        cv2.rectangle(img, (x, y), (x + int(rng.integers(4, 30)), y + int(rng.integers(4, 30))), int(rng.integers(0, 256)), -1)
+        rw, rh = int(rng.integers(4, 30)), int(rng.integers(4, 30))
+        cv2.rectangle(img, (x, y), (x + rw, y + rh), int(rng.integers(0, 256)), -1)
     r_true = rotation_rpy(np.radians(2.0), np.radians(-1.0), np.radians(30.0))
     v, u = np.mgrid[0:h, 0:w].astype(np.float64)
     src = ray_to_pixel(pixel_to_ray(u.ravel(), v.ravel(), w, h) @ r_true, w, h).reshape(h, w, 2).astype(np.float32)

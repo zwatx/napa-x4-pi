@@ -150,5 +150,13 @@ def angular_radius(rays: np.ndarray, centre: np.ndarray) -> float:
     return float(np.arccos(np.clip(r @ c, -1, 1)).max())
 
 
-__all__ = ["pixel_to_ray", "ray_to_pixel", "unwrap_near", "tangent_basis", "TangentView", "side_bow_px",
-           "angular_radius"]
+__all__ = [
+    "TangentView",
+    "angular_radius",
+    "pixel_to_ray",
+    "ray_to_pixel",
+    "side_bow_px",
+    "tangent_bases",
+    "tangent_basis",
+    "unwrap_near",
+]

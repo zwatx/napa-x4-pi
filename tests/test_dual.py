@@ -2,12 +2,11 @@
 
 import numpy as np
 import pytest
+from synth import add_tag, blank, equirect_to_dual, to_u8
 
 from x4tags.detector import X4TagDetector
 from x4tags.dual import DualView
 from x4tags.equirect import pixel_to_ray
-
-from synth import add_tag, blank, equirect_to_dual, to_u8
 
 # Corners measured in the calibration (1080-mode pixel, direction from the 2880x1440 mode), from steady poses.
 CALIBRATION_SAMPLE = [

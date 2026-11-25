@@ -32,7 +32,7 @@ def test_steady_times_lose_the_jitter():
 
 
 def test_not_locked_returns_arrivals_unchanged():
-    cap, arr = arrivals(seconds=2.0)
+    _cap, arr = arrivals(seconds=2.0)
     clock = FrameClock()
     assert [clock(t) for t in arr] == list(arr)
     assert not clock.locked
@@ -86,7 +86,7 @@ def test_delays_spanning_more_than_a_frame_fall_back_to_arrivals():
 
 
 def test_a_new_frame_rate_drops_the_lock_within_seconds():
-    cap, arr = arrivals(seconds=20.0)
+    _cap, arr = arrivals(seconds=20.0)
     cap2 = arr[-1] + 0.04 + np.arange(400) * 0.040  # the camera switches to 25 fps
     arr2 = cap2 + np.random.default_rng(5).uniform(0, 0.02, len(cap2))
     clock = FrameClock()

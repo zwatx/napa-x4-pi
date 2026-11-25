@@ -39,7 +39,7 @@ def test_bow_is_small_on_the_horizon_and_larger_above_it():
 
 
 def test_tangent_bases_match_the_single_version():
-    from x4tags.equirect import tangent_basis, tangent_bases
+    from x4tags.equirect import tangent_bases, tangent_basis
 
     rng = np.random.default_rng(2)
     dirs = np.concatenate([rng.normal(size=(50, 3)), [[0, 1.0, 0], [0, -2.0, 0]]])

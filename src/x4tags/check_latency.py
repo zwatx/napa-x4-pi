@@ -128,7 +128,8 @@ def fit_latency(times, angles, motion: dict, lo_s: float = 0.0, hi_s: float = 0.
     near = np.abs(taken - np.median(taken)) < 50  # leave out misreads
     # The robust fit centres on the typical frame; shifting by the mean gives the mean delay, which is what frame
     # times that keep the arrivals' average (the frame clock, or none) need.
-    return lat - float(taken[near].mean()) / 1e3, float(1.4826 * np.median(np.abs(taken - np.median(taken)))), int(keep.sum())
+    scatter = float(1.4826 * np.median(np.abs(taken - np.median(taken))))  # robust std, ms
+    return lat - float(taken[near].mean()) / 1e3, scatter, int(keep.sum())
 
 
 def make_server(tag_id: int, period_s: float, y_fraction: float, port: int, motion: dict,

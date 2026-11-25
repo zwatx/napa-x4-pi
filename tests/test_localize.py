@@ -7,8 +7,8 @@ import pytest
 from synth import add_tag_at, blank, to_u8
 
 from x4tags import X4TagDetector
-from x4tags.field import FieldLayout, matrix_to_rpy, quaternion_to_matrix, matrix_to_quaternion
 from x4tags.detector import lens_centre
+from x4tags.field import FieldLayout, matrix_to_quaternion, matrix_to_rpy, quaternion_to_matrix
 from x4tags.localize import FieldLocalizer, robot_position_from_heading
 from x4tags.mount import Mount, rotation_rpy
 
@@ -18,8 +18,9 @@ SIZE = 0.1651
 def room_layout() -> dict:
     """WPILib-format layout: 12 tags on the walls of a 6 m x 4 m room, facing in, 0.4-1.4 m up."""
     tags, k = [], 1
-    for x, y, yaw in [(0.0, 1.0, 0), (0.0, 2.5, 0), (6.0, 1.2, 180), (6.0, 3.0, 180), (2.0, 0.0, 90), (4.5, 0.0, 90),
-                      (1.5, 4.0, -90), (3.5, 4.0, -90), (5.0, 4.0, -90), (0.0, 3.6, 0), (6.0, 0.4, 180), (3.0, 0.0, 90)]:
+    for x, y, yaw in [(0.0, 1.0, 0), (0.0, 2.5, 0), (6.0, 1.2, 180), (6.0, 3.0, 180), (2.0, 0.0, 90),
+                      (4.5, 0.0, 90), (1.5, 4.0, -90), (3.5, 4.0, -90), (5.0, 4.0, -90), (0.0, 3.6, 0),
+                      (6.0, 0.4, 180), (3.0, 0.0, 90)]:
         z = 0.4 + 0.25 * (k % 5)
         q = matrix_to_quaternion(rotation_rpy(0, 0, math.radians(yaw)))
         tags.append({"ID": k, "pose": {"translation": {"x": x, "y": y, "z": z},
@@ -44,7 +45,8 @@ def test_layout_json_round_trip_and_corner_order():
     assert len(layout.tags) == 12 and layout.length_m == 6.0
     corners = layout[1].corners(SIZE)  # tag 1 on the x=0 wall facing +x: printed right is +y (the viewer's right)
     np.testing.assert_allclose(corners[0], layout[1].position + [0, SIZE / 2, -SIZE / 2])  # bottom-right first
-    np.testing.assert_allclose(quaternion_to_matrix(*matrix_to_quaternion(layout[3].rotation)), layout[3].rotation, atol=1e-12)
+    r = layout[3].rotation
+    np.testing.assert_allclose(quaternion_to_matrix(*matrix_to_quaternion(r)), r, atol=1e-12)
 
 
 @pytest.mark.parametrize("robot_xy,robot_yaw_deg", [((2.4, 1.7), 30.0), ((4.0, 2.6), -120.0), ((1.2, 1.0), 175.0)])
@@ -84,7 +86,7 @@ def _scene(robot_xy, yaw_deg, mount=Mount(z_m=0.55), seed=0, max_m=4.0):
 
 
 def test_one_tag_alone_gives_no_field_pose():
-    layout, mount, p_r, tags = _scene((2.4, 1.7), 30.0)
+    layout, mount, _p_r, tags = _scene((2.4, 1.7), 30.0)
     assert FieldLocalizer(layout, SIZE, mount).solve(tags[:1]) is None  # ambiguous: two fits, metres apart
     assert FieldLocalizer(layout, SIZE, mount, min_tags=1).solve(tags[:1]) is not None  # if you insist
 
@@ -180,7 +182,7 @@ def test_covariances_match_the_errors(n_tags):
 def test_field_pose_packs_for_networktables():
     from x4tags.publish import FIELD_POSE_FIELDS, field_pose_values
 
-    layout, mount, p_r, tags = _scene((2.4, 1.7), 30.0)
+    layout, mount, _p_r, tags = _scene((2.4, 1.7), 30.0)
     pose = FieldLocalizer(layout, SIZE, mount).solve(tags)
     v = field_pose_values(pose)
     assert len(v) == len(FIELD_POSE_FIELDS) == 28 and np.all(np.isfinite(v))
@@ -223,7 +225,8 @@ def test_a_tag_on_the_stitch_is_trusted_less_not_thrown_out():
 
     def camera(turn_deg):  # the camera turned about its own vertical axis
         a = math.radians(turn_deg)
-        return r_fr @ mount.rotation @ np.array([[math.cos(a), 0, math.sin(a)], [0, 1, 0], [-math.sin(a), 0, math.cos(a)]])
+        turn = np.array([[math.cos(a), 0, math.sin(a)], [0, 1, 0], [-math.sin(a), 0, math.cos(a)]])
+        return r_fr @ mount.rotation @ turn
 
     def az(r_fc):
         d = r_fc.T @ (layout[target].position - c)

@@ -59,8 +59,10 @@ class FieldPose:
 
     def to_dict(self) -> dict:
         roll, pitch, yaw = self.robot_rpy_deg
-        d = {"robot_xyz_m": np.round(self.robot_position, 4).tolist(), "robot_rpy_deg": [round(roll, 3), round(pitch, 3), round(yaw, 3)],
-             "camera_xyz_m": np.round(self.camera_position, 4).tolist(), "rms_px": round(self.rms_px, 3), "tags": self.tag_ids,
+        d = {"robot_xyz_m": np.round(self.robot_position, 4).tolist(),
+             "robot_rpy_deg": [round(roll, 3), round(pitch, 3), round(yaw, 3)],
+             "camera_xyz_m": np.round(self.camera_position, 4).tolist(), "rms_px": round(self.rms_px, 3),
+             "tags": self.tag_ids,
              "xy_std_m": round(self.xy_std_m, 4), "yaw_std_deg": round(self.yaw_std_deg, 3)}
         if self.robot_covariance is not None:
             d["robot_covariance"] = [[float(f"{x:.6g}") for x in row] for row in self.robot_covariance]
@@ -159,7 +161,8 @@ class FieldLocalizer:
         r_rc = self.mount.rotation  # camera axes in robot axes
         r_fr = r_fc @ r_rc.T
         robot = self._robot_pose2d(r_fc, c, cov)
-        return FieldPose(c, r_fc, c - r_fr @ self.mount.translation, r_fr, rms * self.px_per_rad, [t.tag_id for t in tags],
+        return FieldPose(c, r_fc, c - r_fr @ self.mount.translation, r_fr, rms * self.px_per_rad,
+                         [t.tag_id for t in tags],
                          xy_std, float(np.degrees(np.sqrt(cov[2, 2]))), cov, robot.covariance, cov[3:5, 3:5].copy())
 
     def _covariance(self, r_fc, jac):
@@ -263,7 +266,8 @@ class FieldLocalizer:
             while True:
                 step = np.linalg.solve(a + lam * np.diag(np.diag(a) + 1e-12), -g)
                 r_new, c_new = r @ _rodrigues(step[:3]), c + step[3:]
-                res_new, jac_new = self._residuals(r_new, c_new, points, rays, bases, lens, jacobian=True)  # usually kept
+                # with the Jacobian: usually the step is kept, and it's needed then
+                res_new, jac_new = self._residuals(r_new, c_new, points, rays, bases, lens, jacobian=True)
                 cost_new = self._cost(res_new)
                 if cost_new <= cost:
                     r, c, cost, lam, res, jac = r_new, c_new, cost_new, max(lam / 10, 1e-9), res_new, jac_new
