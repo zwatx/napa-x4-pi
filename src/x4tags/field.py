@@ -73,17 +73,30 @@ class FieldLayout:
         self.tags, self.length_m, self.width_m = tags, length_m, width_m
 
     @classmethod
-    def from_dict(cls, data: dict) -> "FieldLayout":
+    def from_dict(cls, data: dict) -> FieldLayout:
+        """From WPILib's layout JSON (``{"tags": [{"ID", "pose": {"translation", "rotation": {"quaternion"}}}],
+        "field": {"length", "width"}}``). ValueError, saying where, when it doesn't look like one."""
         tags = {}
-        for t in data["tags"]:
-            tr, q = t["pose"]["translation"], t["pose"]["rotation"]["quaternion"]
-            tags[int(t["ID"])] = FieldTag(int(t["ID"]), np.array([tr["x"], tr["y"], tr["z"]], float),
-                                          quaternion_to_matrix(q["W"], q["X"], q["Y"], q["Z"]))
+        if not isinstance(data, dict) or not isinstance(data.get("tags"), list):
+            raise ValueError('not a WPILib AprilTag layout: expected {"tags": [...], "field": {...}}')
+        for k, t in enumerate(data["tags"]):
+            try:
+                tid = int(t["ID"])
+                tr, q = t["pose"]["translation"], t["pose"]["rotation"]["quaternion"]
+                tag = FieldTag(tid, np.array([tr["x"], tr["y"], tr["z"]], float),
+                               quaternion_to_matrix(q["W"], q["X"], q["Y"], q["Z"]))
+            except (KeyError, TypeError, ValueError) as e:
+                raise ValueError(f"tag {k} in the layout: missing or bad {e}") from e
+            if tid in tags:
+                raise ValueError(f"tag ID {tid} is in the layout twice")
+            tags[tid] = tag
+        if not tags:
+            raise ValueError("the layout has no tags")
         field = data.get("field", {})
         return cls(tags, field.get("length"), field.get("width"))
 
     @classmethod
-    def load(cls, path: str) -> "FieldLayout":
+    def load(cls, path: str) -> FieldLayout:
         with open(path) as f:
             return cls.from_dict(json.load(f))
 

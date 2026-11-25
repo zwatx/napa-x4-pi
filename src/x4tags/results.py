@@ -51,7 +51,8 @@ class FrameResult:
     field_pose: FieldPose | None = None
 
     def to_dict(self, now: float) -> dict:
-        d = {"seq": self.seq, "age_ms": round((now - self.capture_time) * 1e3, 2), "decode_ms": round(self.decode_ms, 2),
+        d = {"seq": self.seq, "age_ms": round((now - self.capture_time) * 1e3, 2),
+             "decode_ms": round(self.decode_ms, 2),
              "detect_ms": round(self.detect_ms, 2), "size": [self.width, self.height],
              "tags": [t.to_dict() for t in self.tags]}
         if self.field_pose is not None:
@@ -71,6 +72,7 @@ def tag_results(tags: list[X4Tag], mount: Mount, frame_height: int, size_m: floa
             pose = X4TagDetector.pose(t, size_m, frame_height, px_per_rad)
             if pose is not None and pose[2] <= max_pose_error_px:
                 rot, pos = mount.pose(pose[0], pose[1])
-                r.distance_m, r.position_m, r.rotation, r.pose_error_px = float(np.linalg.norm(pose[1])), pos, rot, pose[2]
+                r.distance_m, r.position_m, r.rotation = float(np.linalg.norm(pose[1])), pos, rot
+                r.pose_error_px = pose[2]
         out.append(r)
     return out

@@ -10,6 +10,7 @@ import time
 
 import numpy as np
 
+from . import __version__
 from .results import FrameResult
 
 log = logging.getLogger(__name__)
@@ -22,8 +23,43 @@ class Publisher:
     def camera_connected(self, connected: bool) -> None:
         pass
 
+    def status(self, text: str) -> None:
+        """The service's state in a few words ("ok", "no camera: ...", ...), whenever it changes."""
+
     def close(self) -> None:
         pass
+
+
+class Guarded(Publisher):
+    """One publisher whose failures are logged (at most every 10 s) and kept away from the others: a broken
+    stdout pipe mustn't stop NetworkTables."""
+
+    def __init__(self, inner: Publisher):
+        self.inner, self.name, self._last, self._missed = inner, type(inner).__name__, -1e9, 0
+
+    def _call(self, method, *args):
+        try:
+            getattr(self.inner, method)(*args)
+        except Exception:
+            now = time.monotonic()
+            if now - self._last >= 10.0:
+                log.warning("%s.%s failed%s", self.name, method,
+                            f" (+{self._missed} more since)" if self._missed else "", exc_info=True)
+                self._last, self._missed = now, 0
+            else:
+                self._missed += 1
+
+    def publish(self, frame):
+        self._call("publish", frame)
+
+    def camera_connected(self, connected):
+        self._call("camera_connected", connected)
+
+    def status(self, text):
+        self._call("status", text)
+
+    def close(self):
+        self._call("close")
 
 
 class StdoutPublisher(Publisher):
@@ -33,13 +69,37 @@ class StdoutPublisher(Publisher):
 
 
 class UdpPublisher(Publisher):
-    def __init__(self, target: str):
-        host, port = target.rsplit(":", 1)
-        # Resolve once: a name lookup per frame (mDNS .local names especially) could stall the loop.
-        self.addr = socket.getaddrinfo(host, int(port), socket.AF_INET, socket.SOCK_DGRAM)[0][4]
+    """One JSON datagram per frame to "host:port". The name is looked up when first needed and again every
+    ``resolve_every_s`` (a lookup per frame, of an mDNS .local name especially, could stall the loop), so a robot or
+    laptop that comes up late, or changes address, is found."""
+
+    def __init__(self, target: str, resolve_every_s: float = 10.0):
+        host, sep, port = target.rpartition(":")
+        if not sep or not host or not port.isdigit():
+            raise ValueError(f"udp = {target!r}: expected \"host:port\"")
+        self.host, self.port, self.resolve_every_s = host, int(port), resolve_every_s
+        self.addr, self._resolved_at, self._failing = None, -1e9, False
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
+    def _resolve(self):
+        now = time.monotonic()
+        if now - self._resolved_at < self.resolve_every_s:
+            return
+        self._resolved_at = now
+        try:
+            self.addr = socket.getaddrinfo(self.host, self.port, socket.AF_INET, socket.SOCK_DGRAM)[0][4]
+            if self._failing:
+                log.info("udp: %s:%d is %s again", self.host, self.port, self.addr[0])
+            self._failing = False
+        except OSError as e:
+            if not self._failing:
+                log.warning("udp: can't find %s (%s); trying again every %.0f s", self.host, e, self.resolve_every_s)
+            self._failing = True
+
     def publish(self, frame):
+        self._resolve()
+        if self.addr is None:
+            return
         data = json.dumps(frame.to_dict(time.monotonic())).encode()
         try:
             self.sock.sendto(data, self.addr)
@@ -51,8 +111,8 @@ class UdpPublisher(Publisher):
 
 
 TAG_FIELDS = ("id", "yaw_deg", "pitch_deg", "distance_m", "x_m", "y_m", "z_m")
-FIELD_POSE_FIELDS = ("robot_x_m", "robot_y_m", "robot_z_m", "roll_deg", "pitch_deg", "yaw_deg", "camera_x_m", "camera_y_m",
-                     "camera_z_m", "rms_px", "tag_count", "xy_std_m", "yaw_std_deg",
+FIELD_POSE_FIELDS = ("robot_x_m", "robot_y_m", "robot_z_m", "roll_deg", "pitch_deg", "yaw_deg",
+                     "camera_x_m", "camera_y_m", "camera_z_m", "rms_px", "tag_count", "xy_std_m", "yaw_std_deg",
                      *(f"robot_cov_{a}_{b}" for a in ("x", "y", "yaw") for b in ("x", "y", "yaw")),
                      *(f"camera_cov_{a}_{b}" for a in ("x", "y") for b in ("x", "y")),
                      "gyro_std_forward_m", "gyro_std_left_m")
@@ -64,7 +124,8 @@ class NetworkTablesPublisher(Publisher):
     - ``tags`` (double[]): every tag of a frame packed in one array, ``len(TAG_FIELDS)`` = 7 values per tag:
       id, yaw_deg, pitch_deg, distance_m, x_m, y_m, z_m (robot frame; distance and position NaN without a pose).
       One array, so a reader never mixes one frame's IDs with another frame's bearings.
-    - ``field_pose`` (double[]): with a field layout, the pose from all tags together, 28 values (``FIELD_POSE_FIELDS``):
+    - ``field_pose`` (double[]): with a field layout, the pose from all tags together, 28 values
+      (``FIELD_POSE_FIELDS``):
       0-2 robot x, y, z (m); 3-5 roll, pitch, yaw (deg); 6-8 camera x, y, z (m); 9 rms_px; 10 tag count;
       11 xy_std_m, 12 yaw_std_deg (expected position and heading error); 13-21 the robot (x, y, yaw) covariance,
       3x3 row by row, field axes, m and rad; 22-25 the camera (x, y) covariance, 2x2 row by row, m; 26-27 the
@@ -82,23 +143,52 @@ class NetworkTablesPublisher(Publisher):
         """``server``: a team number ("1234"), or a host ("10.12.34.2", "localhost"), optionally ":port"."""
         import ntcore  # optional dependency: pip install "napa-x4-pi[nt]"
 
+        self._nt, self._server, self._table, self._client_name = ntcore, str(server), table, client_name
         self._now = ntcore._now  # NT's local clock, microseconds (the time base set(value, time) expects)
-        self.inst = ntcore.NetworkTableInstance.create()
-        self.inst.startClient4(client_name)
-        host, _, port = str(server).partition(":")
+        self._connected, self._status = False, "starting"
+        self._start()
+
+    def _start(self):
+        nt = self._nt
+        self.inst = nt.NetworkTableInstance.create()
+        self.inst.addConnectionListener(False, self._on_connection)
+        self.inst.startClient4(self._client_name)
+        host, _, port = self._server.partition(":")
         port = int(port) if port else 0  # 0: NT4's default port
         if host.isdigit():
             self.inst.setServerTeam(int(host), port)
         else:
             self.inst.setServer(host, port)
-        t = self.inst.getTable(table)
+        t = self.inst.getTable(self._table)
         self.tags = t.getDoubleArrayTopic("tags").publish()
         self.field_pose = t.getDoubleArrayTopic("field_pose").publish()
         self.frame = t.getIntegerTopic("frame").publish()
         self.timings = {k: t.getDoubleTopic(k).publish() for k in ("age_ms", "decode_ms", "detect_ms")}
         self.connected = t.getBooleanTopic("camera_connected").publish()
+        self.status_pub = t.getStringTopic("status").publish()
+        self.version_pub = t.getStringTopic("version").publish()  # kept: a dropped publisher unpublishes
+        self.version_pub.set(__version__)
+        self.connected.set(self._connected)
+        self.status_pub.set(self._status)
+        # NT's clock is the wall clock: if that steps back (NTP at boot, say), NT drops every value stamped before its
+        # last one until the clock catches up. Watch how it moves against the monotonic clock to notice.
+        self._offset = self._now() / 1e6 - time.monotonic()
+
+    def _on_connection(self, event):  # on ntcore's listener thread: logging only
+        info = event.data
+        what = "connected to" if event.is_(self._nt.EventFlags.kConnected) else "disconnected from"
+        log.info("NetworkTables: %s %s:%d", what, info.remote_ip, info.remote_port)
+
+    def _check_clock(self):
+        offset = self._now() / 1e6 - time.monotonic()
+        if abs(offset - self._offset) > 0.5:
+            log.warning("the clock jumped %+.1f s: restarting NetworkTables so values aren't dropped",
+                        offset - self._offset)
+            self._stop()
+            self._start()
 
     def publish(self, frame):
+        self._check_clock()
         nan = float("nan")
         now = time.monotonic()
         stamp = int(self._now() - (now - frame.capture_time) * 1e6)
@@ -120,15 +210,24 @@ class NetworkTablesPublisher(Publisher):
         self.inst.flush()  # send now rather than at NT's next periodic update
 
     def camera_connected(self, connected):
+        self._connected = connected
         self.connected.set(connected)
         if not connected:
             self.tags.set([])  # no stale tags or poses while the camera is away
             self.field_pose.set([])
         self.inst.flush()
 
-    def close(self):
+    def status(self, text):
+        self._status = text
+        self.status_pub.set(text)
+        self.inst.flush()
+
+    def _stop(self):
         self.inst.stopClient()
         type(self.inst).destroy(self.inst)
+
+    def close(self):
+        self._stop()
 
 
 def field_pose_values(fp) -> list[float]:

@@ -112,7 +112,7 @@ def analyze(times, rotvecs, moved_deg: float, what: str = "turn", moving_deg_s: 
     speed = np.linalg.norm(np.diff(w, axis=0), axis=1) / np.maximum(np.diff(t), 1e-3)
     fast = np.nonzero(speed > moving_deg_s)[0]
     if len(fast) == 0:
-        return f"the picture never turned quickly: move it faster (well under a second)", numbers
+        return "the picture never turned quickly: move it faster (well under a second)", numbers
     after = t > t[fast[-1] + 1] + 0.2  # from just after the hand let go
     if after.sum() < 5 or t[-1] - t[fast[-1] + 1] < 8.0:
         return "the camera was still moving near the end: let go earlier and leave it until the end", numbers
@@ -168,6 +168,11 @@ def main(argv=None) -> int:
                                           f"quickly, let go, and don't touch it until told"))
     ok = True
     with X4Webcam(a.device, reduce=4) as cam:
+        _, gray = cam.read(timeout=5.0)
+        if gray.shape[1] != 2 * gray.shape[0]:
+            print(f"the camera sends a {gray.shape[1] * 4}x{gray.shape[0] * 4} picture: this check needs the X4's "
+                  f"360-degree (2880x1440) webcam output", flush=True)
+            return 1
         for what, deg, prompt in steps:
             print(f"{what}: hold the camera still, hands off...", flush=True)
             times, frames = _record(cam, a.seconds, prompt)

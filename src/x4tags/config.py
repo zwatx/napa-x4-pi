@@ -8,7 +8,6 @@ from dataclasses import field as _field  # a section is called `field`
 
 from .mount import Mount
 
-
 MODE_SIZES = {"equirect": (2880, 1440), "dual1080": (1920, 1080)}
 # One X4's latency with frame times from V4L2 and the frame clock, by check_latency's moving tag on a 120 Hz
 # monitor (120-121 and 98 ms) less that monitor's own delay (about 20 and 23 ms: one or two refreshes, scan-out to
@@ -46,7 +45,7 @@ class DetectorConfig:
     threads: int = 1  # NAPA threads per search (Pi 5: more don't help in equirect, 2 save ~0.6 ms in dual1080)
     refine_bow_px: float | None = 0.2  # refine tags whose sides the frame bends more than this; None: never
     seam_px: int = 192  # 0: don't search across the left/right seam
-    near_scale: float = 1 / 3  # straight views for close, strongly bent tags, at this fraction of the resolution; 0: off
+    near_scale: float = 1 / 3  # straight views for close, strongly bent tags, at this fraction of resolution; 0: off
     near_per_frame: int = 2  # of the 12 straight views, search this many per frame in rotation (0: all every frame)
     family: str = "tag36h11"
     # The gamma the X4 encodes its picture with, undone before fitting tag edges (NapaDetector's camera_gamma). NAPA's
@@ -94,8 +93,8 @@ class Config:
 
 _NUMBER = (int, float)
 _TYPES = {
-    "camera": dict(device=(str,), mode=(str,), width=(int,), height=(int,), fps=(int,), reduce=(int,), reconnect_s=_NUMBER,
-                   latency_ms=_NUMBER),
+    "camera": dict(device=(str,), mode=(str,), width=(int,), height=(int,), fps=(int,), reduce=(int,),
+                   reconnect_s=_NUMBER, latency_ms=_NUMBER),
     "detector": dict(min_tag_px=(int,), threads=(int,), refine_bow_px=_NUMBER + (str,), seam_px=(int,),
                      camera_gamma=_NUMBER + (str,),
                      near_scale=_NUMBER, near_per_frame=(int,), family=(str,), extra=(dict,)),
@@ -114,7 +113,7 @@ def _build(cls, data: dict, where: str):
         raise ValueError(f"unknown key(s) in [{where}]: {', '.join(sorted(unknown))}")
     for key, value in data.items():
         allowed = _TYPES[where][key]
-        if isinstance(value, bool) and bool not in allowed or not isinstance(value, allowed):
+        if (isinstance(value, bool) and bool not in allowed) or not isinstance(value, allowed):
             raise ValueError(f"[{where}] {key} = {value!r}: expected {' or '.join(t.__name__ for t in allowed)}")
     return cls(**data)
 
@@ -131,7 +130,8 @@ def load(path: str | None) -> Config:
         raise ValueError(f"unknown section(s): {', '.join(sorted(unknown))}")
     built = {name: _build(cls, data.get(name, {}), name) for name, cls in sections.items()}
     # TOML has no null: "none"/"off" means unset for these, "auto" means find the camera.
-    for obj, key, words in ((built["detector"], "refine_bow_px", ("none", "off")), (built["tags"], "size_m", ("none", "off")),
+    for obj, key, words in ((built["detector"], "refine_bow_px", ("none", "off")),
+                            (built["tags"], "size_m", ("none", "off")),
                             (built["detector"], "camera_gamma", ("none", "off")),
                             (built["camera"], "device", ("auto",))):
         value = getattr(obj, key)
@@ -147,12 +147,52 @@ def load(path: str | None) -> Config:
         raise ValueError("[camera] width and height: set both or neither (neither: the mode's size)")
     want = MODE_SIZES[cam.mode]
     if cam.width is not None and cam.width * want[1] != cam.height * want[0]:
-        raise ValueError(f"[camera] {cam.width}x{cam.height} isn't the shape of mode {cam.mode!r} ({want[0]}x{want[1]}): "
-                         f"remove width/height, or set the mode")
+        raise ValueError(f"[camera] {cam.width}x{cam.height} isn't the shape of mode {cam.mode!r} "
+                         f"({want[0]}x{want[1]}): remove width/height, or set the mode")
     if built["camera"].reduce not in (1, 2, 4):
         raise ValueError(f"[camera] reduce = {built['camera'].reduce}: expected 1, 2 or 4")
     if built["field"].layout is not None and built["tags"].size_m is None:
         raise ValueError("[field] layout needs [tags] size_m")
     if built["output"].nt_server is not None:
         built["output"].nt_server = str(built["output"].nt_server)  # a bare team number is fine
+    _check_values(built)
     return Config(**built)
+
+
+def _check_values(b: dict) -> None:
+    """Values that would only fail later, at the first frame or after hours of running."""
+    cam, det, tags, fld, out = b["camera"], b["detector"], b["tags"], b["field"], b["output"]
+    checks = [
+        (cam.fps >= 0, "[camera] fps", "0 or more (0 replays files as fast as they decode)"),
+        (cam.reconnect_s >= 0, "[camera] reconnect_s", "0 or more"),
+        (cam.latency_ms is None or cam.latency_ms >= 0, "[camera] latency_ms", "0 or more"),
+        (det.min_tag_px >= 4, "[detector] min_tag_px", "4 or more"),
+        (det.threads >= 1, "[detector] threads", "1 or more"),
+        (det.refine_bow_px is None or det.refine_bow_px >= 0, "[detector] refine_bow_px", "0 or more, or \"none\""),
+        (det.seam_px >= 0, "[detector] seam_px", "0 or more"),
+        (0 <= det.near_scale <= 1, "[detector] near_scale", "between 0 and 1"),
+        (det.near_per_frame >= 0, "[detector] near_per_frame", "0 or more"),
+        (det.camera_gamma is None or det.camera_gamma > 0, "[detector] camera_gamma", "more than 0, or \"none\""),
+        (tags.size_m is None or tags.size_m > 0, "[tags] size_m", "more than 0, or \"none\""),
+        (tags.max_pose_error_px > 0, "[tags] max_pose_error_px", "more than 0"),
+        (tags.ids is None or all(isinstance(i, int) and not isinstance(i, bool) for i in tags.ids), "[tags] ids",
+         "a list of tag IDs (whole numbers)"),
+        (fld.max_rms_px > 0, "[field] max_rms_px", "more than 0"),
+        (fld.min_tags >= 1, "[field] min_tags", "1 or more"),
+        (fld.corner_noise_px > 0, "[field] corner_noise_px", "more than 0"),
+        (fld.max_xy_std_m > 0, "[field] max_xy_std_m", "more than 0"),
+        (out.stats_every_s >= 0, "[output] stats_every_s", "0 or more"),
+        (out.udp is None or _host_port(out.udp), "[output] udp", '"host:port", like "10.12.34.5:5800"'),
+    ]
+    for ok, what, expected in checks:
+        if not ok:
+            raise ValueError(f"{what}: expected {expected}")
+    named = {f.name for f in fields(DetectorConfig)} | {"mode", "view_margin", "max_view_px", "min_view_px"}
+    clash = named & set(det.extra)
+    if clash:
+        raise ValueError(f"[detector] extra sets {', '.join(sorted(clash))}: set it as its own key instead")
+
+
+def _host_port(text: str) -> bool:
+    host, sep, port = text.rpartition(":")
+    return bool(sep and host and port.isdigit() and 0 < int(port) < 65536)

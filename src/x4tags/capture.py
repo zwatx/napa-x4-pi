@@ -20,6 +20,8 @@ import cv2
 import numpy as np
 
 X4_USB_VENDOR = "2e1a"
+# libjpeg decodes straight to grey, at full, half or quarter size (``reduce``)
+DECODE_FLAGS = {1: cv2.IMREAD_GRAYSCALE, 2: cv2.IMREAD_REDUCED_GRAYSCALE_2, 4: cv2.IMREAD_REDUCED_GRAYSCALE_4}
 log = logging.getLogger(__name__)
 
 
@@ -54,6 +56,7 @@ class FrameClock:
         self.window_s, self.lock_frames, self.refit_every = window_s, lock_frames, refit_every
         self.max_misfit = max_misfit
         self._prev = -np.inf  # last time returned
+        self._told_unused = False  # said once why it doesn't lock on (the 1080 mode tries again every 10 s)
         self._retry = refit_every  # frames between tries to lock on; doubles after each failure, up to 10 s
         self.reset()
 
@@ -156,8 +159,10 @@ class FrameClock:
             return False
         late = float(((t - self._a) / self.period - np.asarray(self._n)).max())
         if late > 0.8:  # some frames nearly a period late: which slot a frame belongs to would be a guess
-            log.info("frame clock not used: frames arrive up to %.0f ms late, too close to a frame period",
-                     late * self.period * 1e3)
+            (log.debug if self._told_unused else log.info)(
+                "frame clock not used: frames arrive up to %.0f ms late, too close to a frame period",
+                late * self.period * 1e3)
+            self._told_unused = True
             self.reset()
             return False
         self._late_max = late + 0.1
@@ -180,11 +185,16 @@ class FrameClock:
         return True
 
 
+def _read(path: str) -> str:
+    with open(path) as f:
+        return f.read().strip()
+
+
 def find_x4_device() -> str | None:
     """/dev/videoN of the X4's capture node, found by USB vendor ID in sysfs (``lsusb`` isn't needed)."""
     for node in sorted(glob.glob("/sys/class/video4linux/video*"), key=lambda p: int(p.rsplit("video", 1)[1])):
         try:
-            if open(os.path.join(node, "index")).read().strip() != "0":
+            if _read(os.path.join(node, "index")) != "0":
                 continue  # metadata nodes share the device; index 0 is the picture
         except OSError:
             continue
@@ -192,11 +202,22 @@ def find_x4_device() -> str | None:
         while path != "/":
             vid = os.path.join(path, "idVendor")
             if os.path.exists(vid):
-                if open(vid).read().strip() == X4_USB_VENDOR:
+                if _read(vid) == X4_USB_VENDOR:
                     return "/dev/" + os.path.basename(node)
                 break
             path = os.path.dirname(path)
     return None
+
+
+def x4_on_usb() -> bool:
+    """Whether an Insta360 camera is on USB at all (with or without a video node: in USB-drive mode it has none)."""
+    for vid in glob.glob("/sys/bus/usb/devices/*/idVendor"):
+        try:
+            if _read(vid) == X4_USB_VENDOR:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 class NewestFrame:
@@ -239,7 +260,8 @@ class X4Webcam:
     """Newest-frame grey capture from the X4 webcam stream.
 
     A background thread reads each JPEG and decodes it as it arrives, on its own core, while the caller works on
-    the previous frame. ``reduce``: 1 for full 2880x1440, 2 for libjpeg's built-in half-size decode (1440x720).
+    the previous frame. ``reduce``: 1 for full size, 2 or 4 for libjpeg's built-in half- or quarter-size decode
+    (1440x720 or 720x360 in the 360-degree mode, 960x540 or 480x270 in the 1080 mode).
     Frame times are arrival times (V4L2's own, when it gives them), steadied by a ``FrameClock``.
     """
 
@@ -247,8 +269,12 @@ class X4Webcam:
                  reduce: int = 1):
         self.device = device or find_x4_device()
         if self.device is None:
-            raise RuntimeError("no Insta360 X4 found; is it in webcam mode and plugged straight into this computer?")
-        self.flag = {1: cv2.IMREAD_GRAYSCALE, 2: cv2.IMREAD_REDUCED_GRAYSCALE_2, 4: cv2.IMREAD_REDUCED_GRAYSCALE_4}[reduce]
+            if x4_on_usb():
+                raise RuntimeError("the X4 is on USB but isn't a webcam: choose Webcam mode on the camera's USB menu "
+                                   "(it may have come up as a USB drive)")
+            raise RuntimeError("no Insta360 X4 on USB: check its cable and power, and plug it straight into this "
+                               "computer (not through a dock)")
+        self.flag = DECODE_FLAGS[reduce]
         cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -269,7 +295,7 @@ class X4Webcam:
         self._running = True
         self.corrupt = 0
         self.last_decode_ms = 0.0
-        self.clock = FrameClock(fps)
+        self.clock = FrameClock(fps if fps > 0 else 30)
         self._thread = threading.Thread(target=self._grab, name="x4-grab", daemon=True)
         self._thread.start()
 
@@ -278,13 +304,20 @@ class X4Webcam:
         return self._frames.dropped
 
     def _grab(self):
+        failed = 0  # reads in a row that gave nothing: back off, up to 0.2 s, rather than spin on an unplugged camera
         try:
             while self._running:
-                ok, buf = self._cap.read()
+                try:
+                    ok, buf = self._cap.read()
+                except Exception:  # cv2.error from the driver: the app sees no frames and reopens the camera
+                    log.exception("reading %s failed", self.device)
+                    return
                 t = time.monotonic()
                 if not ok:
-                    time.sleep(0.005)
+                    failed += 1
+                    time.sleep(min(0.005 * 2 ** min(failed, 6), 0.2))
                     continue
+                failed = 0
                 # V4L2's buffer time, on the same clock: when the frame's USB transfer began (3-6 ms before read()
                 # returns on a Pi 5), and not held up by this thread being busy decoding the previous frame.
                 kernel = self._cap.get(cv2.CAP_PROP_POS_MSEC) / 1e3
@@ -300,7 +333,13 @@ class X4Webcam:
                     if self.corrupt in (1, 10, 100) or self.corrupt % 1000 == 0:
                         log.warning("%d corrupt frames from %s so far", self.corrupt, self.device)
                     continue
-                self._frames.put(self.clock(t), gray, (time.perf_counter() - t0) * 1e3)
+                try:
+                    t_frame = self.clock(t)
+                except Exception:  # a bug in the clock mustn't stop the frames: arrival times instead
+                    log.exception("frame clock failed; using arrival times")
+                    self.clock.reset()
+                    t_frame = t
+                self._frames.put(t_frame, gray, (time.perf_counter() - t0) * 1e3)
         finally:
             self._cap.release()  # only here, so it never happens in the middle of a read
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import cached_property
 
 import numpy as np
 
@@ -25,7 +26,8 @@ CAMERA_TO_ROBOT_AXES = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 
 
 def rotation_rpy(roll: float, pitch: float, yaw: float) -> np.ndarray:
     """WPILib Rotation3d(roll, pitch, yaw) as a matrix (radians): Rz(yaw) @ Ry(pitch) @ Rx(roll)."""
-    cr, sr, cp, sp, cy, sy = math.cos(roll), math.sin(roll), math.cos(pitch), math.sin(pitch), math.cos(yaw), math.sin(yaw)
+    cr, sr, cp, sp = math.cos(roll), math.sin(roll), math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
     rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
     ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
     rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
@@ -41,7 +43,7 @@ class Mount:
     pitch_deg: float = 0.0
     yaw_deg: float = 0.0
 
-    @property
+    @cached_property  # the mount is frozen: worked out once
     def rotation(self) -> np.ndarray:
         """Robot-from-camera rotation (camera-frame vectors -> robot-frame vectors)."""
         r = rotation_rpy(math.radians(self.roll_deg), math.radians(self.pitch_deg), math.radians(self.yaw_deg))

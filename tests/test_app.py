@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from synth import add_tag, blank, to_u8
 
+import x4tags
 from x4tags import app, config, publish
 from x4tags.mount import Mount
 from x4tags.publish import StdoutPublisher
@@ -21,7 +22,8 @@ def frames_dir(tmp_path_factory):
     for i, (tag_id, lon) in enumerate([(5, 30), (5, 40), (9, -90)]):
         img = blank(seed=i)
         add_tag(img, tag_id, lon_deg=lon, lat_deg=3, distance_m=1.5)
-        cv2.imwrite(str(d / f"{i:03d}.jpg"), cv2.cvtColor(to_u8(img), cv2.COLOR_GRAY2BGR), [cv2.IMWRITE_JPEG_QUALITY, 92])
+        bgr = cv2.cvtColor(to_u8(img), cv2.COLOR_GRAY2BGR)
+        cv2.imwrite(str(d / f"{i:03d}.jpg"), bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
     return d
 
 
@@ -59,7 +61,10 @@ def test_networktables(frames_dir):
         port = s.getsockname()[1]
     server.startServer("", "127.0.0.1", 0, port)
     try:
-        sub = server.getTable("x4tags").getDoubleArrayTopic("tags").subscribe([], ntcore.PubSubOptions(pollStorage=50))
+        table = server.getTable("x4tags")
+        sub = table.getDoubleArrayTopic("tags").subscribe([], ntcore.PubSubOptions(pollStorage=50))
+        status = table.getStringTopic("status").subscribe("", ntcore.PubSubOptions(pollStorage=10))
+        version = table.getStringTopic("version").subscribe("", ntcore.PubSubOptions(pollStorage=10))
         cfg = config.load(None)
         cfg.camera.fps = 5
         cfg.output.nt_server = f"localhost:{port}"
@@ -71,6 +76,8 @@ def test_networktables(frames_dir):
         assert {int(v[0]) for v in packed} <= {5, 9}
         d = packed[0][stride - 4]
         assert d == pytest.approx(1.5, rel=0.03)  # distance_m
+        assert "ok" in [v.value for v in status.readQueue()]
+        assert x4tags.__version__ in [v.value for v in version.readQueue()]
     finally:
         ntcore.NetworkTableInstance.destroy(server)
 
