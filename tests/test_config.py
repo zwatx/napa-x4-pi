@@ -47,7 +47,7 @@ def test_camera_mode_sets_the_size_and_latency(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text('[camera]\nmode = "dual1080"\n')
     cfg = config.load(str(p))
-    assert cfg.camera.size() == (1920, 1080) and cfg.camera.latency() == 112.0
+    assert cfg.camera.size() == (1920, 1080) and cfg.camera.latency() == 75.0
     p.write_text('[camera]\nmode = "dual1080"\nlatency_ms = 90\nwidth = 960\nheight = 540\n')
     cfg = config.load(str(p))
     assert cfg.camera.size() == (960, 540) and cfg.camera.latency() == 90.0

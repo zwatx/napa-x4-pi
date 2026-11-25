@@ -10,10 +10,10 @@ from .mount import Mount
 
 
 MODE_SIZES = {"equirect": (2880, 1440), "dual1080": (1920, 1080)}
-# Measured on one X4 with check_latency (median 154-163 ms and 133 ms), less ~20 ms for the screen's own delay.
-# Measured on one X4 as 140 and 115 ms to when read() returned a frame; frame times now come from V4L2, when the
-# frame's USB transfer began, 5.5 and 3 ms earlier on a Pi 5.
-MODE_LATENCY_MS = {"equirect": 135.0, "dual1080": 112.0}
+# One X4's latency with frame times from V4L2 and the frame clock, by check_latency's moving tag on a 120 Hz
+# monitor (120-121 and 98 ms) less that monitor's own delay (about 20 and 23 ms: one or two refreshes, scan-out to
+# the tag's height, pixel response). Good to about 8 ms either way.
+MODE_LATENCY_MS = {"equirect": 100.0, "dual1080": 75.0}
 
 
 @dataclass

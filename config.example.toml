@@ -9,8 +9,8 @@ mode = "equirect"            # or "dual1080": 1920x1080 front/back views, sharpe
 fps = 30
 reduce = 1                   # 2 = decode at half size (1440x720): cheaper, halves the range
 reconnect_s = 2.0
-# latency_ms = 135.0         # camera -> Pi delay (stitch, encode, USB), subtracted from timestamps; default: measured
-                             # on one X4, 135 for "equirect" and 112 for "dual1080"; check yours with check_latency
+# latency_ms = 100.0         # camera -> Pi delay (stitch, encode, USB), subtracted from timestamps; default: measured
+                             # on one X4, 100 for "equirect" and 75 for "dual1080"; check yours with check_latency
 
 [detector]
 min_tag_px = 16              # smallest tag side (pixels) NAPA looks for; 22 (NAPA's default) misses far tags

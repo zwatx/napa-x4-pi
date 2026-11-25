@@ -3,17 +3,25 @@
 import cv2
 import numpy as np
 
-from x4tags.check_latency import latencies
+from x4tags.check_latency import along_track, fit_latency, motion_x
 from x4tags.check_stabilization import analyze, rotation_between
 from x4tags.equirect import pixel_to_ray, ray_to_pixel
 from x4tags.mount import rotation_rpy
 
 
-def test_latency_matches_each_flip_to_the_first_frame_showing_it():
-    flips = [(1.0, 1), (3.0, 0), (5.0, 1)]
-    frames = [(t, {1} if (1.12 <= t < 3.12 or t >= 5.12) else {0}) for t in np.arange(0, 7, 1 / 30)]
-    ms = latencies(flips, frames)
-    assert len(ms) == 3 and all(115 <= m <= 160 for m in ms)
+def test_latency_fit_finds_a_known_delay_from_a_sliding_tag():
+    # a tag sliding across a screen 0.6 m away, 0.2 m above the camera; frames 120 ms late, 0.15 px of corner noise
+    rng = np.random.default_rng(0)
+    motion = dict(t0=100.0, period_s=3.0, amp_px=1000.0, cx_px=1280.0)
+    capture = 100.0 + np.arange(900) / 29.97
+    x, _ = motion_x(capture, motion)
+    rays = np.stack([(x - 1280) * 0.000233, np.full_like(x, -0.2), np.full_like(x, 0.6)], 1)
+    rays += rng.normal(0, 0.15 / 458 * 0.6, rays.shape)
+    lat, jitter, n = fit_latency(capture + 0.120, along_track(rays), motion)
+    assert abs(lat - 0.120) < 0.001 and jitter < 1.5 and n > 400
+    late = capture + 0.120 + rng.uniform(0, 0.025, len(capture))  # uneven delivery: scatter shows, mean delay found
+    lat, jitter, _ = fit_latency(late, along_track(rays), motion)
+    assert abs(lat - 0.1325) < 0.0015 and jitter > 4  # the mean delay
 
 
 def _trace(kind, axis=(0.0, 1.0, 0.0), moved=90.0):
@@ -60,29 +68,44 @@ def test_rotation_between_recovers_a_known_rotation():
     assert inliers > 200 and err < 0.15
 
 
-def test_latency_page_serves_tags_and_records_flips():
+def test_latency_page_serves_the_tag_and_records_its_motion():
+    import json
     import threading
+    import time
     import urllib.request
 
     from x4tags.check_latency import make_server
 
-    import time
-
-    flips, rtt = [], []
-    server = make_server({"A": 3, "B": 4}, 2.0, 0, flips, sync_rtt=rtt)
+    motion = {}
+    server = make_server(40, 3.0, 0.5, 0, motion)
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    post = lambda path: urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}{path}", method="POST"))
+    url = f"http://127.0.0.1:{port}"
     try:
-        page = urllib.request.urlopen(f"http://127.0.0.1:{port}/").read().decode()
-        assert "}, 2000));" in page and "im.decode()" in page
-        png = urllib.request.urlopen(f"http://127.0.0.1:{port}/tag/B.png").read()
-        assert png[:8] == b"\x89PNG\r\n\x1a\n"
-        server_ms = float(post("/sync").read())  # the server's clock, for the page to sync its own to
+        page = urllib.request.urlopen(url + "/").read().decode()
+        assert "const img" in page and "P = 3000" in page and "Y = 0.5" in page and "requestAnimationFrame" in page
+        assert urllib.request.urlopen(url + "/tag.png").read()[:8] == b"\x89PNG\r\n\x1a\n"
+        server_ms = float(urllib.request.urlopen(urllib.request.Request(url + "/sync", method="POST")).read())
         assert abs(server_ms - time.time() * 1e3) < 1000
-        # a flip the page timed half a second ago (in the server's clock, after syncing), reported now
-        post(f"/flip?to=B&t={time.time() * 1e3 - 500}&rtt=8.5")
-        assert len(flips) == 1 and flips[0][1] == 4 and rtt == [8.5]
-        assert abs(flips[0][0] - (time.monotonic() - 0.5)) < 0.05  # converted to time.monotonic()'s clock
+        body = json.dumps(dict(t0_ms=time.time() * 1e3 - 500, rtt_ms=8.5, period_ms=3000, amp_px=1000, cx_px=1280))
+        urllib.request.urlopen(urllib.request.Request(url + "/motion", data=body.encode(), method="POST"))
+        assert abs(motion["t0"] - (time.monotonic() - 0.5)) < 0.05  # on time.monotonic()'s clock
+        assert motion["period_s"] == 3.0 and motion["amp_px"] == 1000 and motion["rtt_ms"] == 8.5
     finally:
         server.shutdown()
+
+
+def test_latency_fit_needs_both_directions_and_avoids_the_mirror():
+    rng = np.random.default_rng(1)
+    motion = dict(t0=100.0, period_s=3.0, amp_px=1000.0, cx_px=1280.0)
+    capture = 100.0 + np.arange(900) / 29.97
+    x, ph = motion_x(capture, motion)
+    rays = np.stack([(x - 1280) * 0.000233, np.full_like(x, -0.2), np.full_like(x, 0.6)], 1)
+    rays += rng.normal(0, 0.15 / 458 * 0.6, rays.shape)
+    one_way = ph < 0.5  # the tag seen moving right only: latency and screen shape can't be told apart
+    assert fit_latency(capture[one_way] + 0.12, along_track(rays[one_way]), motion) is None
+    fast = dict(motion, period_s=0.5)  # half a period on, the path is mirrored: the search stays short of it
+    x, _ = motion_x(capture, fast)
+    rays = np.stack([(x - 1280) * 0.000233, np.full_like(x, -0.2), np.full_like(x, 0.6)], 1)
+    lat, _, _ = fit_latency(capture + 0.12, along_track(rays), fast)
+    assert abs(lat - 0.12) < 0.002
