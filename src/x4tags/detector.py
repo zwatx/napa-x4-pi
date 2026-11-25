@@ -30,7 +30,7 @@ from .equirect import TangentView, angular_radius, pixel_to_ray, ray_to_pixel, s
 # The X4 is two cameras back to back: the front half of its picture (z > 0) is seen from its front lens's centre and
 # the back half from its back lens's, this far ahead of and behind the middle of the body (28 mm apart; sideways
 # offsets fitted at under 0.2 mm). Measured with tags on a screen across the stitch at 0.6 and 1 m: taking one centre
-# for both halves left 6-13 px between them there, about 4 px at 3 m.
+# for both halves left 11-13 px between them at 1 m and ~20 px at 0.6 m, about 4 px at 3 m.
 LENS_OFFSET_M = 0.014
 
 

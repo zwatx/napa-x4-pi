@@ -95,7 +95,7 @@ away, and the pose used all eight tags, 1.3 mm from the pose fitted to the far t
 **Two lenses, two centres.** With the tags across the stitch (on a denser grid, 21 tags), the two halves of the
 picture disagreed by 11-13 px at 1 m and about 20 px at 0.6 m: the X4's lenses sit back to back, and each half of
 the picture is seen from its own lens's centre, about 28 mm apart (14 mm either side of the body's middle, measured at
-both distances; sideways offsets came out under 0.2 mm). Treated as one centre, tags on both sides of the camera gave
+both distances; sideways offsets came out at about 0.2 mm). Treated as one centre, tags on both sides of the camera gave
 no field pose at all at those distances, and would be about 4 px apart at 3 m. The field pose and single tags' poses
 now take each corner from its own lens: every frame at 1 m got a pose from all 19 tags in view (0.39 px), and at
 0.6 m, 18 of 20 frames from all 17 (0.57 px). Tag positions are from the middle of the camera body.
@@ -182,7 +182,7 @@ with the X4 plugged into any Linux computer that has a screen and this package i
 
    So for 10-20 s after the robot turns, anything that depends on the picture's heading is a few degrees off. That
    means bearings to tags, the robot heading in `field_pose`, and through the mount offset the robot position there
-   too. The *camera's* position isn't affected, because the picture turns about the lens.
+   too. The *camera's* position is barely affected (1-2 mm), because the picture turns about the lenses.
 
    Take the heading from the robot's gyro and combine it with `field_pose`'s camera position. The Java example under
    [What the robot sees](#what-the-robot-sees) does this, as does `x4tags.localize.robot_position_from_heading`. To
@@ -215,8 +215,9 @@ with the X4 plugged into any Linux computer that has a screen and this package i
 
 Everything lives in `/etc/x4tags.toml`, and `config.example.toml` lists every key. These are the ones to set:
 
-- `[mount]` is where the camera sits on the robot and how it's turned, in WPILib conventions. Positive pitch tips the
-  view down and positive yaw turns it left. At zero, the middle of the picture looks along the robot's +x.
+- `[mount]` is where the camera sits on the robot and how it's turned, in WPILib conventions. Measure its position
+  to the middle of the camera body, halfway between the two lenses. Positive pitch tips the view down and positive
+  yaw turns it left. At zero, the middle of the picture looks along the robot's +x.
 - `[tags] size_m` is the side of the black square (0.1651 for FRC). Without it you get bearings only.
 - `[field] layout` is a WPILib AprilTag field layout JSON, such as the season's file from WPILib, and turns on
   `field_pose`. Keep `min_tags` at 2 or more, because a single tag's pose has two nearly equally good fits, metres
@@ -237,7 +238,9 @@ Everything lives in `/etc/x4tags.toml`, and `config.example.toml` lists every ke
 
 ## What the robot sees
 
-NetworkTables 4, under the table `/x4tags` (rename it with `nt_table`):
+NetworkTables 4, under the table `/x4tags` (rename it with `nt_table`). Positions are from the middle of the camera
+body; a tag's yaw and pitch are its direction from the lens that sees it, which for a tag 1 m away to the side can
+differ from the direction from the body's middle by up to 0.8 degrees.
 
 | Topic | Type | |
 |---|---|---|
@@ -384,8 +387,9 @@ tag across the seam keeps its quad whole, so a corner's column can be below 0 or
 - Values sent before NetworkTables has synced its clock with the robot may carry the Pi's own time base. Check the
   timestamps on a real robot.
 - Range is short (see [Measured](#measured)). Distant tags need a narrower camera.
-- The X4 stitches its two lenses, about 3 cm apart, in the camera. A close tag on a stitch line can come out slightly
-  misplaced, and the rendered tests don't model that.
+- The X4 stitches its two lenses, 28 mm apart, in the camera. A close tag right on a stitch line is seen partly by
+  each, so its single-tag pose can be off by about 1 cm (the field pose takes each corner from its own lens and
+  trusts corners there less). The rendered tests show each tag through one lens only.
 - Single-tag poses don't report the IPPE ambiguity, so a face-on tag's rotation can be a few degrees off.
 - The 1080 mode's calibration comes from one X4.
 

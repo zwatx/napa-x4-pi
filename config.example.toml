@@ -28,7 +28,8 @@ size_m = 0.1651              # black-square side (FRC: 6.5 in); "none" = bearing
 max_pose_error_px = 4.0
 # ids = [1, 2, 3]            # only report these
 
-[mount]                      # camera on the robot, WPILib robot frame (x forward, y left, z up)
+[mount]                      # camera on the robot, WPILib robot frame (x forward, y left, z up); position of the
+                             # middle of the camera body, halfway between its two lenses
 x_m = 0.0
 y_m = 0.0
 z_m = 0.5

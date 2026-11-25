@@ -5,10 +5,10 @@ direction the camera's front lens faces, unless the stitch is re-centred in the 
 Robot frame (WPILib): x forward, y left, z up, origin wherever the robot code puts it (usually the robot's centre
 on the floor).
 
-The mount is the camera's position on the robot and its rotation as WPILib's ``Rotation3d(roll, pitch, yaw)``:
-roll about x, then pitch about y, then yaw about z, all about the robot's axes. Zero rotation means the picture's
-middle looks along the robot's +x with the picture upright. Positive pitch tips the camera's forward view down,
-positive yaw turns it left, as in WPILib.
+The mount is the camera's position on the robot (the middle of its body, halfway between the two lenses) and its
+rotation as WPILib's ``Rotation3d(roll, pitch, yaw)``: roll about x, then pitch about y, then yaw about z, all about
+the robot's axes. Zero rotation means the picture's middle looks along the robot's +x with the picture upright.
+Positive pitch tips the camera's forward view down, positive yaw turns it left, as in WPILib.
 """
 
 from __future__ import annotations

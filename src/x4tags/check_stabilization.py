@@ -9,7 +9,7 @@ turn that off. Measured on one X4 (firmware of 2026-11), camera in hand, turned 
 - a camera at rest gives a still picture (< 0.002 degrees of drift in 15 s).
 
 So treat the picture's heading as a few degrees off after the robot turns: take heading from the gyro and use the
-camera *position* from the field pose (it isn't affected: the picture turns about the lens centre).
+camera *position* from the field pose (barely affected: the picture turns about the lenses, 28 mm apart).
 
 How it measures: frames are kept at quarter size while you move the camera, then each frame's rotation relative to
 the last one (camera at rest) is fitted from matched ORB features, as directions on the sphere (RANSAC + Kabsch).
