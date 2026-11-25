@@ -66,16 +66,23 @@ def test_latency_page_serves_tags_and_records_flips():
 
     from x4tags.check_latency import make_server
 
-    flips = []
-    server = make_server({"A": 3, "B": 4}, 2.0, 0, flips)
+    import time
+
+    flips, rtt = [], []
+    server = make_server({"A": 3, "B": 4}, 2.0, 0, flips, sync_rtt=rtt)
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    post = lambda path: urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}{path}", method="POST"))
     try:
         page = urllib.request.urlopen(f"http://127.0.0.1:{port}/").read().decode()
         assert "}, 2000));" in page and "im.decode()" in page
         png = urllib.request.urlopen(f"http://127.0.0.1:{port}/tag/B.png").read()
         assert png[:8] == b"\x89PNG\r\n\x1a\n"
-        urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/flip?to=B", method="POST"))
-        assert len(flips) == 1 and flips[0][1] == 4
+        server_ms = float(post("/sync").read())  # the server's clock, for the page to sync its own to
+        assert abs(server_ms - time.time() * 1e3) < 1000
+        # a flip the page timed half a second ago (in the server's clock, after syncing), reported now
+        post(f"/flip?to=B&t={time.time() * 1e3 - 500}&rtt=8.5")
+        assert len(flips) == 1 and flips[0][1] == 4 and rtt == [8.5]
+        assert abs(flips[0][0] - (time.monotonic() - 0.5)) < 0.05  # converted to time.monotonic()'s clock
     finally:
         server.shutdown()

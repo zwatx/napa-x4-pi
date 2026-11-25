@@ -1,12 +1,15 @@
 """Measure the X4's latency: how long from something changing in front of it to the frame showing it arriving here.
 
-A browser on this computer shows a big tag whose ID flips every couple of seconds; the page reports each flip once
-it has been drawn. Point the X4 at the screen (the tag a metre or so away is plenty). Each flip's latency is the
+A browser shows a big tag whose ID flips every couple of seconds and reports each flip once it has been drawn, timed
+by its own clock: before flipping it measures its clock against this computer's over the quickest of 30 round trips,
+so the browser can be on another computer (a laptop next to the robot's Pi) over a slow or uneven network, to within
+half that round trip. Point the X4 at the screen (the tag a metre or so away is plenty). Each flip's latency is the
 arrival time of the first frame showing the new ID minus the flip time, which also includes the screen's own delay
 (the compositor and panel: typically 1-3 refreshes, 17-50 ms at 60 Hz), so treat the result as an upper bound;
 subtract your screen's delay if you know it. Use the median as ``[camera] latency_ms``.
 
     python -m x4tags.check_latency [--mode dual1080]   # then open http://localhost:8765 here, full screen
+    python -m x4tags.check_latency --host 0.0.0.0      # or open http://<this computer>:8765 on another one
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ import argparse
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 from napa_vision.tags import png_bytes, tag_image
@@ -30,10 +34,22 @@ img{position:fixed;inset:0;margin:auto;height:90vh;image-rendering:pixelated}</s
 <script>
 // Both pictures are decoded up front and only their visibility is toggled, so a flip shows on the next frame.
 const imgs = [document.getElementById("A"), document.getElementById("B")]; let k = 0;
-Promise.all(imgs.map(im => im.decode())).then(() => setInterval(() => {
+const now = () => performance.timeOrigin + performance.now();  // ms
+async function sync() {  // the server's clock minus ours, from the quickest of 30 round trips
+  let best = null;
+  for (let i = 0; i < 30; i++) {
+    const t0 = now(), ts = parseFloat(await (await fetch("/sync", {method: "POST"})).text()), t1 = now();
+    if (!best || t1 - t0 < best.rtt) best = {rtt: t1 - t0, off: ts - (t0 + t1) / 2};
+  }
+  return best;
+}
+Promise.all(imgs.map(im => im.decode())).then(sync).then(clock => setInterval(() => {
   imgs[k].style.visibility = "hidden"; k = 1 - k; imgs[k].style.visibility = "visible";
-  // two animation frames: the change has been handed to the compositor before it's reported
-  requestAnimationFrame(() => requestAnimationFrame(() => fetch("/flip?to=" + imgs[k].id, {method: "POST"})));
+  // two animation frames: the change has been handed to the compositor when it's timed
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const t = now() + clock.off;
+    fetch(`/flip?to=${imgs[k].id}&t=${t}&rtt=${clock.rtt}`, {method: "POST"});
+  }));
 }, PERIOD_MS));
 </script></body></html>"""
 
@@ -51,8 +67,10 @@ def latencies(flips: list[tuple[float, int]], frames: list[tuple[float, set[int]
     return out
 
 
-def make_server(ids: dict[str, int], period_s: float, port: int, flips: list) -> ThreadingHTTPServer:
-    """The page and tag images on localhost:port; each reported flip is appended to ``flips`` as (time, new id)."""
+def make_server(ids: dict[str, int], period_s: float, port: int, flips: list, host: str = "127.0.0.1",
+                sync_rtt: list | None = None) -> ThreadingHTTPServer:
+    """The page and tag images on host:port; each reported flip is appended to ``flips`` as (time.monotonic() time,
+    new id), and the round trip its clock was synced over (ms) to ``sync_rtt``."""
     pngs = {k: png_bytes(tag_image(v, cell_px=40, quiet_zone_cells=2)) for k, v in ids.items()}  # 480 px
     page = PAGE.replace("PERIOD_MS", str(int(period_s * 1000))).encode()
 
@@ -72,16 +90,27 @@ def make_server(ids: dict[str, int], period_s: float, port: int, flips: list) ->
             self.wfile.write(body)
 
         def do_POST(self):
-            t = time.monotonic()
-            if self.path.startswith("/flip?to="):
-                flips.append((t, ids[self.path.rsplit("=", 1)[1]]))
+            if self.path == "/sync":
+                body = repr(time.time() * 1e3).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path.startswith("/flip?"):
+                q = parse_qs(urlparse(self.path).query)
+                wall_to_mono = time.monotonic() - time.time()
+                flips.append((float(q["t"][0]) / 1e3 + wall_to_mono, ids[q["to"][0]]))
+                if sync_rtt is not None:
+                    sync_rtt.append(float(q["rtt"][0]))
             self.send_response(204)
             self.end_headers()
 
         def log_message(self, *args):
             pass
 
-    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    return ThreadingHTTPServer((host, port), Handler)
 
 
 def main(argv=None) -> int:
@@ -89,6 +118,7 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--device")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--host", default="127.0.0.1", help="address to serve the page on (0.0.0.0: any computer)")
     ap.add_argument("--flips", type=int, default=20)
     ap.add_argument("--period", type=float, default=2.0, help="seconds between flips")
     ap.add_argument("--ids", default="0,1", help="the two tag IDs to show")
@@ -97,10 +127,15 @@ def main(argv=None) -> int:
     id_a, id_b = (int(x) for x in a.ids.split(","))
     flips: list[tuple[float, int]] = []
     frames: list[tuple[float, set[int]]] = []
-    server = make_server({"A": id_a, "B": id_b}, a.period, a.port, flips)
+    rtt: list[float] = []
+    server = make_server({"A": id_a, "B": id_b}, a.period, a.port, flips, a.host, rtt)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(f"open http://localhost:{a.port} in a browser on this computer, full screen, and point the X4 at it")
-    det = X4TagDetector(near_scale=0, seam_px=0, mode=a.mode)  # a big tag in front: no extra searches
+    where = "this computer" if a.host.startswith("127.") else "any computer that can reach this one"
+    print(f"open http://{'localhost' if a.host.startswith('127.') else '<this computer>'}:{a.port} in a browser on "
+          f"{where}, full screen, and point the X4 at it")
+    # Every near view, every frame: a big tag on a screen above the horizon can come out too bent for the full-frame
+    # search, and found only in a near view; one searched in rotation could find it frames after a flip.
+    det = X4TagDetector(seam_px=0, near_per_frame=0, mode=a.mode)
     with X4Webcam(a.device, *MODE_SIZES[a.mode]) as cam:
         try:
             if cam.size != MODE_SIZES[a.mode]:
@@ -121,6 +156,8 @@ def main(argv=None) -> int:
     m = np.array(ms)
     print(f"{len(m)} flips: latency median {np.median(m):.0f} ms, 10-90% {np.percentile(m, 10):.0f}-{np.percentile(m, 90):.0f} ms "
           f"(an upper bound: includes the screen's own delay)")
+    if rtt:
+        print(f"browser clock synced to within {max(rtt) / 2:.1f} ms (half the quickest round trip)")
     print(f"set [camera] latency_ms = {np.median(m):.0f}")
     return 0
 
