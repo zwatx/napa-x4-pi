@@ -161,7 +161,8 @@ def run(cfg: config_mod.Config, replay: str | None = None, seconds: float | None
     det_cfg = cfg.detector
     detector = X4TagDetector(refine_bow_px=det_cfg.refine_bow_px, seam_px=det_cfg.seam_px, near_scale=det_cfg.near_scale,
                              near_per_frame=det_cfg.near_per_frame, min_tag_px=det_cfg.min_tag_px,
-                             mode=cfg.camera.mode, threads=det_cfg.threads, family=det_cfg.family, **det_cfg.extra)
+                             mode=cfg.camera.mode, threads=det_cfg.threads, family=det_cfg.family,
+                             **{"camera_gamma": det_cfg.camera_gamma, **det_cfg.extra})
     localizer = None
     if cfg.field.layout:
         layout = FieldLayout.load(cfg.field.layout)

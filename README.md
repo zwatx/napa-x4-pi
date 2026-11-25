@@ -79,6 +79,15 @@ the two the 1080 mode sees, well inside the published 5 mm and 45 mm. Over 4,200
 it, nothing was reported. On a practice field, three tags on a board whose centres are marked 17 1/4 in apart, seen
 from 1.3 m in the 1080 mode, came out 17.45 and 17.25 in apart.
 
+**Tags at known places.** Eight tags shown on a 27-inch monitor at known positions (75 mm squares, 149-168 mm
+apart, from the panel's pixel pitch), 0.5-0.8 m from the X4 and up to 28 degrees above its horizon, checked the
+picture's geometry directly. The field pose fitted all seven tags it saw to within 0.25 px (0.13-0.35 px per tag), so
+the 360-degree picture has no error there beyond the corners' own; its camera position wandered by under 0.1 mm.
+Without the refinement of bent tags the fit was 0.37 px. Undoing a gamma of 2.0 (`[detector] camera_gamma`, below)
+brought it to 0.22 px. Spacings worked out from single tags' own poses came within -1.5 to +3.9 mm of the truth.
+The latency check against that monitor, at 120 Hz with the browser's clock synced over Wi-Fi, gave 144 ms median
+(134-155 ms), which includes the monitor's own delay: in line with the default 135.
+
 **Frame times.** The X4 captures on a steady clock (29.97 fps) but its frames reach the Pi late by an uneven
 amount, in a repeating pattern of three: in the 360-degree mode about 16, 9 and 0 ms late plus noise, so timing each
 frame by its arrival made its timestamp jitter by about 6 ms (standard deviation), 2 cm at 3 m/s. The service fits
@@ -162,14 +171,17 @@ with the X4 plugged into any Linux computer that has a screen and this package i
    It reports *body-fixed*, *follows ... but creeps* (with how far and how slowly), *heading-locked* or
    *horizon-locked*. If the horizon is locked, leave `[mount]` pitch and roll at 0.
 
-2. **How late are frames?** Run the check below, open the page it serves in a browser on the same computer, full
-   screen, and point the X4 at the screen. The page flips a tag's ID, and the check times how long the change takes
-   to arrive. That time includes the screen's own delay, typically 17-50 ms, so it's an upper bound. Put the median,
-   less your screen's delay, in `[camera] latency_ms`. One X4 measured about 135 ms, which is the default. Close any
-   browser or system pop-ups first, because one covering the tag hides it.
+2. **How late are frames?** Run the check below, open the page it serves in a browser full screen, and point the
+   X4 at the screen. On a Pi without a screen, add `--host 0.0.0.0` and open `http://<the Pi>:8765` on a laptop:
+   the page times the flips by its own clock, synced to the Pi's. Show tag IDs that aren't on the wall (`--ids`).
+   The page flips a tag's ID, and the check times how long the change takes to arrive. That time includes the
+   screen's own delay, typically 17-50 ms, so it's an upper bound. Put the median, less your screen's delay, in
+   `[camera] latency_ms`. One X4 measured about 135 ms, which is the default. Close any browser or system pop-ups
+   first, because one covering the tag hides it.
 
    ```sh
    .venv/bin/python -m x4tags.check_latency          # then open http://localhost:8765
+   .venv/bin/python -m x4tags.check_latency --host 0.0.0.0 --ids 20,21   # page on another computer
    ```
 
 ## Settings
@@ -192,6 +204,9 @@ Everything lives in `/etc/x4tags.toml`, and `config.example.toml` lists every ke
 - `[detector] min_tag_px` is 16 by default, below NAPA's own 22: field tags across the room are often 16-22 px in
   the 360-degree picture. On a Pi 5, 16 adds about 1.2 ms per frame. `near_scale = 0` turns off the close-tag
   views, which run beside the full-frame search and use about 3 ms of a second core per frame on a Pi 5.
+- `[detector] camera_gamma` is 2.0: the X4's picture isn't linear in light, and undoing its gamma before fitting
+  tag edges cut corner error by about a third on rendered frames and 10% against a screen's exact geometry, at no
+  cost. NAPA's `estimate_camera_gamma` read 1.7-2.4 from X4 clips. `"none"` treats the picture as linear.
 
 ## What the robot sees
 

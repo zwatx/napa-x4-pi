@@ -16,13 +16,14 @@ def test_example_config_loads():
 def test_defaults_without_a_file():
     cfg = config.load(None)
     assert cfg.detector.refine_bow_px == 0.2 and cfg.camera.device is None
+    assert cfg.detector.camera_gamma == 2.0 and cfg.detector.min_tag_px == 16
 
 
 def test_none_strings_and_unknown_keys(tmp_path):
     p = tmp_path / "c.toml"
-    p.write_text('[detector]\nrefine_bow_px = "none"\n[tags]\nsize_m = "none"\n')
+    p.write_text('[detector]\nrefine_bow_px = "none"\ncamera_gamma = "none"\n[tags]\nsize_m = "none"\n')
     cfg = config.load(str(p))
-    assert cfg.detector.refine_bow_px is None and cfg.tags.size_m is None
+    assert cfg.detector.refine_bow_px is None and cfg.tags.size_m is None and cfg.detector.camera_gamma is None
     p.write_text("[detector]\nmin_tag = 3\n")
     with pytest.raises(ValueError, match="min_tag"):
         config.load(str(p))

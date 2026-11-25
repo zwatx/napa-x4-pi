@@ -49,6 +49,10 @@ class DetectorConfig:
     near_scale: float = 1 / 3  # straight views for close, strongly bent tags, at this fraction of the resolution; 0: off
     near_per_frame: int = 2  # of the 12 straight views, search this many per frame in rotation (0: all every frame)
     family: str = "tag36h11"
+    # The gamma the X4 encodes its picture with, undone before fitting tag edges (NapaDetector's camera_gamma). NAPA's
+    # estimate_camera_gamma read 1.7-2.4 from X4 clips; 2.0 cut corner error 36% on rendered frames and 10% against a
+    # screen's exact geometry, at no cost. None: treat the picture as linear.
+    camera_gamma: float | None = 2.0
     extra: dict = _field(default_factory=dict)  # any other NapaDetector keyword
 
 
@@ -93,6 +97,7 @@ _TYPES = {
     "camera": dict(device=(str,), mode=(str,), width=(int,), height=(int,), fps=(int,), reduce=(int,), reconnect_s=_NUMBER,
                    latency_ms=_NUMBER),
     "detector": dict(min_tag_px=(int,), threads=(int,), refine_bow_px=_NUMBER + (str,), seam_px=(int,),
+                     camera_gamma=_NUMBER + (str,),
                      near_scale=_NUMBER, near_per_frame=(int,), family=(str,), extra=(dict,)),
     "tags": dict(size_m=_NUMBER + (str,), max_pose_error_px=_NUMBER, ids=(list,)),
     "mount": {k: _NUMBER for k in ("x_m", "y_m", "z_m", "roll_deg", "pitch_deg", "yaw_deg")},
@@ -127,6 +132,7 @@ def load(path: str | None) -> Config:
     built = {name: _build(cls, data.get(name, {}), name) for name, cls in sections.items()}
     # TOML has no null: "none"/"off" means unset for these, "auto" means find the camera.
     for obj, key, words in ((built["detector"], "refine_bow_px", ("none", "off")), (built["tags"], "size_m", ("none", "off")),
+                            (built["detector"], "camera_gamma", ("none", "off")),
                             (built["camera"], "device", ("auto",))):
         value = getattr(obj, key)
         if isinstance(value, str):
