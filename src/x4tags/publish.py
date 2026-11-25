@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import socket
 import sys
 import threading
@@ -122,6 +123,17 @@ FIELD_POSE_FIELDS = ("robot_x_m", "robot_y_m", "robot_z_m", "roll_deg", "pitch_d
                      "gyro_std_forward_m", "gyro_std_left_m")
 
 
+def _json_finite(value):
+    """Keep unavailable measurements readable by strict JSON decoders."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _json_finite(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_finite(item) for item in value]
+    return value
+
+
 class NetworkTablesPublisher(Publisher):
     """Publishes under /<table>/ (default /x4tags/):
 
@@ -137,6 +149,7 @@ class NetworkTablesPublisher(Publisher):
       ``addVisionMeasurement`` with the gyro's heading. Empty when there's no solution. The robot values use the
       picture's heading, which lags the body by a few degrees after quick turns; the camera position holds either
       way (use it with the gyro's heading).
+    - ``frame_json`` (json): the full UDP/stdout frame, including per-tag diagnostics and field pose contributor IDs.
     - ``frame`` (int), ``age_ms``, ``decode_ms``, ``detect_ms`` (double), ``camera_connected`` (boolean).
 
     Every value of a frame carries the frame's capture time (``camera.latency_ms`` before it arrived) as its NT
@@ -167,6 +180,7 @@ class NetworkTablesPublisher(Publisher):
         self.tags = t.getDoubleArrayTopic("tags").publish()
         self.field_pose = t.getDoubleArrayTopic("field_pose").publish()
         self.frame = t.getIntegerTopic("frame").publish()
+        self.frame_json = t.getStringTopic("frame_json").publishEx("json", {})
         self.timings = {k: t.getDoubleTopic(k).publish() for k in ("age_ms", "decode_ms", "detect_ms")}
         self.connected = t.getBooleanTopic("camera_connected").publish()
         self.status_pub = t.getStringTopic("status").publish()
@@ -212,6 +226,7 @@ class NetworkTablesPublisher(Publisher):
         self.timings["age_ms"].set((now - frame.capture_time) * 1e3, stamp)
         self.timings["decode_ms"].set(frame.decode_ms, stamp)
         self.timings["detect_ms"].set(frame.detect_ms, stamp)
+        self.frame_json.set(json.dumps(_json_finite(frame.to_dict(now)), allow_nan=False, separators=(",", ":")), stamp)
         self.inst.flush()  # send now rather than at NT's next periodic update
 
     def camera_connected(self, connected):
@@ -220,6 +235,7 @@ class NetworkTablesPublisher(Publisher):
         if not connected:
             self.tags.set([])  # no stale tags or poses while the camera is away
             self.field_pose.set([])
+            self.frame_json.set('{"tags":[]}')
         self.inst.flush()
 
     def status(self, text):
@@ -230,8 +246,8 @@ class NetworkTablesPublisher(Publisher):
     def _stop(self):
         # Close every publisher first: one left for the garbage collector unpublishes the restarted instance's
         # publishers of the same topics (ntcore reuses the handles), and the robot would see nothing again.
-        for pub in (self.tags, self.field_pose, self.frame, *self.timings.values(), self.connected, self.status_pub,
-                    self.version_pub):
+        for pub in (self.tags, self.field_pose, self.frame, self.frame_json, *self.timings.values(), self.connected,
+                    self.status_pub, self.version_pub):
             pub.close()
         self.inst.stopClient()
         type(self.inst).destroy(self.inst)

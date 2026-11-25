@@ -144,7 +144,8 @@ frame was taken (estimated: its arrival less `latency_ms`) as its NetworkTables 
 |---|---|---|
 | `field_pose` | double[] | with a field layout: 28 values (below), empty when there's no fit |
 | `tags` | double[] | 7 values per tag: id, yaw_deg, pitch_deg, distance_m, x_m, y_m, z_m |
-| `camera_connected` | boolean | true while frames arrive; `tags` and `field_pose` are emptied when it goes false |
+| `frame_json` | json | full frame diagnostics, including tag corners, detector quality, and field-pose contributor IDs |
+| `camera_connected` | boolean | true while frames arrive; the pose and tag data are cleared when it goes false |
 | `status` | string | `ok`, or what's wrong (`no camera: ...`, `camera stalled: ...`, ...) |
 | `frame`, `age_ms`, `decode_ms`, `detect_ms` | int, double | per frame: `age_ms` is from when the frame was taken to when it was sent (so it includes `latency_ms`); `detect_ms` includes the field pose |
 | `version` | string | the x4tags version |
@@ -217,12 +218,14 @@ direction of the tag's centre from the lens that sees it, in robot axes; for a t
 differ from the direction from the body's middle by up to 0.8 degrees. Distance and position are NaN without
 `[tags] size_m` or when the tag's pose fits poorly.
 
-**UDP and stdout** (`[output] udp`, `print`) carry one JSON object per frame instead: `seq`, `age_ms`, `decode_ms`,
-`detect_ms`, `size`, `tags` (each with `id`, `yaw_deg`, `pitch_deg`, `corners_px`, `refined`, `seam`, `near`,
+**Frame JSON** (`frame_json` over NT and the optional UDP and stdout outputs) carries one object per frame with
+`seq`, `age_ms`, `decode_ms`, `detect_ms`, `size`, `tags` (each with `id`, `yaw_deg`, `pitch_deg`, `corners_px`,
+`refined`, `seam`, `near`,
 `hamming`, `margin`, and with a pose `distance_m`, `position_m`, `rotation`, `pose_error_px`) and `field_pose`
 (`robot_xyz_m`, `robot_rpy_deg`, `camera_xyz_m`, `rms_px`, `tags` (IDs), `xy_std_m`, `yaw_std_deg` and, when it has
-them, `robot_covariance`, `camera_xy_covariance`, `gyro_std_devs_m`). There's no shared clock: take the receive time
-less `age_ms` as when the frame was taken.
+them, `robot_covariance`, `camera_xy_covariance`, `gyro_std_devs_m`). Expand `frame_json` in AdvantageScope to view
+its fields. NT sends non-finite diagnostics as JSON `null` and sends `{"tags":[]}` when the camera disconnects.
+For UDP and stdout, estimate capture time as the receive time minus `age_ms`.
 
 ### Pose uncertainty
 

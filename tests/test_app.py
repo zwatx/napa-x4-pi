@@ -11,6 +11,7 @@ from synth import add_tag, blank, to_u8
 
 import x4tags
 from x4tags import app, config, publish
+from x4tags.localize import FieldPose
 from x4tags.mount import Mount
 from x4tags.publish import StdoutPublisher
 from x4tags.results import FrameResult, TagResult
@@ -63,19 +64,28 @@ def test_networktables(frames_dir):
     try:
         table = server.getTable("x4tags")
         sub = table.getDoubleArrayTopic("tags").subscribe([], ntcore.PubSubOptions(pollStorage=50))
+        details = table.getStringTopic("frame_json").subscribeEx("json", "", ntcore.PubSubOptions(pollStorage=50))
         status = table.getStringTopic("status").subscribe("", ntcore.PubSubOptions(pollStorage=10))
         version = table.getStringTopic("version").subscribe("", ntcore.PubSubOptions(pollStorage=10))
         cfg = config.load(None)
         cfg.camera.fps = 5
         cfg.output.nt_server = f"localhost:{port}"
         app.run(cfg, replay=str(frames_dir), loop=True, seconds=3.0)
-        packed = [list(v.value) for v in sub.readQueue() if len(v.value)]
+        packed = {v.time: list(v.value) for v in sub.readQueue() if len(v.value)}
         assert packed, "no tags arrived"
         stride = len(publish.TAG_FIELDS)
-        assert all(len(v) % stride == 0 for v in packed)
-        assert {int(v[0]) for v in packed} <= {5, 9}
-        d = packed[0][stride - 4]
+        assert all(len(v) % stride == 0 for v in packed.values())
+        assert {int(v[0]) for v in packed.values()} <= {5, 9}
+        d = next(iter(packed.values()))[stride - 4]
         assert d == pytest.approx(1.5, rel=0.03)  # distance_m
+        frame = next((json.loads(v.value) for v in details.readQueue() if v.time in packed), None)
+        assert frame is not None, "no JSON frame with a matching capture timestamp"
+        assert frame["size"] == [2880, 1440]
+        tag = frame["tags"][0]
+        assert tag["id"] in {5, 9}
+        assert np.shape(tag["corners_px"]) == (4, 2)
+        assert np.shape(tag["rotation"]) == (3, 3)
+        assert {"refined", "seam", "near", "hamming", "margin", "pose_error_px"} <= tag.keys()
         assert "ok" in [v.value for v in status.readQueue()]
         assert x4tags.__version__ in [v.value for v in version.readQueue()]
     finally:
@@ -163,6 +173,9 @@ def test_networktables_keeps_publishing_after_the_clock_jumps(monkeypatch):
     pub = publish.NetworkTablesPublisher(f"localhost:{port}")
     try:
         frames = server.getTable("x4tags").getIntegerTopic("frame").subscribe(-1, ntcore.PubSubOptions(pollStorage=100))
+        details = server.getTable("x4tags").getStringTopic("frame_json").subscribeEx(
+            "json", "", ntcore.PubSubOptions(pollStorage=100)
+        )
         status = server.getTable("x4tags").getStringTopic("status").subscribe("")
 
         def send(seq):
@@ -181,7 +194,27 @@ def test_networktables_keeps_publishing_after_the_clock_jumps(monkeypatch):
             send(seq)
         got = {v.value for v in frames.readQueue()}
         assert set(range(30, 40)) <= got  # still arriving well after the restart
+        assert set(range(30, 40)) <= {json.loads(v.value)["seq"] for v in details.readQueue()}
         assert status.get() == "ok"  # state carried over to the restarted connection
+
+        pose = FieldPose(np.zeros(3), np.eye(3), np.zeros(3), np.eye(3), 0.2, [5, 9])
+        pub.publish(FrameResult(40, time.monotonic(), 2880, 1440, 9.0, 3.0, field_pose=pose))
+        deadline = time.monotonic() + 5
+        while json.loads(details.get()).get("seq") != 40 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        frame = json.loads(details.get())
+        assert frame["seq"] == 40
+        assert frame["field_pose"]["tags"] == [5, 9]
+        assert frame["field_pose"]["xy_std_m"] is None
+
+        # Restore a real clock after exercising the restart; otherwise set(value) uses a different clock
+        # from the fake one that stamped every frame above.
+        monkeypatch.setattr(pub, "_now", real)
+        pub.camera_connected(False)
+        deadline = time.monotonic() + 5
+        while json.loads(details.get()) != {"tags": []} and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert json.loads(details.get()) == {"tags": []}
     finally:
         pub.close()
         ntcore.NetworkTableInstance.destroy(server)
