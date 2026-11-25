@@ -89,8 +89,9 @@ class FieldLocalizer:
     ``min_tags``: fewer tags give no pose. One tag's pose has two nearly equally good solutions, metres apart, that
     its fit error can't tell apart, so the default is 2.
     ``max_rms_px``: a pose is accepted only if every tag's corners fit within this (pixels of the frame). When some
-    don't, each tag is left out in turn (up to 8 tags) and the best fit without it is kept, if it still has
-    ``min_tags`` tags and all of them fit: one misread or misplaced tag can't pull the pose, or hide in it.
+    don't, the worst-fitting tag is left out first, then (if the rest still don't all fit) each tag in turn, up to 8
+    tags; a fit without it is kept if it still has ``min_tags`` tags and all of them fit: one misread or misplaced tag
+    can't pull the pose, or hide in it.
     ``corner_noise_px``: assumed corner error, for the pose's covariances and expected errors. A good fit can still be
     weak, e.g. two small, distant tags in nearly the same direction: these say how much to trust it.
     ``max_xy_std_m``: give no pose when the expected position error is larger than this.
@@ -129,7 +130,7 @@ class FieldLocalizer:
                 if good(fit):
                     best = (fit, rest)
             # Otherwise leave each tag out in turn and keep the best fit in which every remaining tag fits. Each
-            # try is a full solve, so this costs (tags + 1) solves a frame: ~35 ms for 5 tags on a Pi 5.
+            # try is a full solve, so this costs up to (tags + 2) solves a frame: ~35 ms for 5 tags on a Pi 5.
             for k in range(len(tags)) if best is None else ():
                 rest = tags[:k] + tags[k + 1:]
                 fit = self._solve(rest)
@@ -255,7 +256,8 @@ class FieldLocalizer:
                 if lam > 1e8:
                     break
             # 1e-5 rad (0.005 px) / 10 micrometres: converged. Tighter only adds an iteration that moves the pose by
-            # ~0.01 micrometres (measured on a live room clip).
+            # ~0.01 micrometres (measured on a live room clip). This is the damped step, so a fit that had to raise
+            # lam a lot can stop a little early; that wasn't seen in practice.
             if lam > 1e8 or np.linalg.norm(step) < 1e-5:
                 break
         u, _, vt = np.linalg.svd(r)  # keep it a rotation

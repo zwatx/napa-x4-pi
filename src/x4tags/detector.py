@@ -16,7 +16,7 @@ runs on the frame, tags across the line between the halves are dropped, and bent
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 
 import cv2
@@ -71,7 +71,9 @@ class X4Tag:
 
 
 class X4TagDetector:
-    """``detect(gray)`` on a stitched X4 frame (2:1). Extra keyword arguments go to ``NapaDetector``.
+    """``detect(gray)`` on a stitched X4 frame (2:1). Extra keyword arguments go to ``NapaDetector``. Use one per
+    thread: it keeps state between frames, and in "equirect" mode runs the seam and near searches on a worker thread
+    of its own with a second NapaDetector (so ``threads`` applies to each).
 
     ``mode``: "equirect" for the 360-degree 2880x1440 picture (or a reduced decode of it), "dual1080" for the
     1920x1080 front/back picture (or a reduced decode); the seam and near-view searches apply to "equirect" only.
@@ -135,7 +137,12 @@ class X4TagDetector:
                 self._side_napa = NapaDetector(**self._napa_kwargs)
                 self._pool = ThreadPoolExecutor(1, thread_name_prefix="x4tags-side")
             side = self._pool.submit(self._side_search, gray, width, height)
-        tags = [self._tag(o, width, height, seam=False) for o in self.napa.detect(gray)]
+        try:
+            tags = [self._tag(o, width, height, seam=False) for o in self.napa.detect(gray)]
+        except BaseException:
+            if side is not None:  # don't leave it running into the next frame
+                wait([side])
+            raise
         if side is not None:
             seam, near = side.result()
             tags += [t for t in seam if not _seen(t, tags, 1.0)]

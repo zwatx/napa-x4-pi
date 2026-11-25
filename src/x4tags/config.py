@@ -41,7 +41,7 @@ class CameraConfig:
 @dataclass
 class DetectorConfig:
     min_tag_px: int = 16  # NAPA's own default is 22: too big for field tags across the 360-degree picture
-    threads: int = 1  # NAPA threads per call (Pi 5: 4 saves only ~1 ms; JPEG decode dominates)
+    threads: int = 1  # NAPA threads per search (Pi 5: more don't help in equirect, 2 save ~0.6 ms in dual1080)
     refine_bow_px: float | None = 0.2  # refine tags whose sides the frame bends more than this; None: never
     seam_px: int = 192  # 0: don't search across the left/right seam
     near_scale: float = 1 / 3  # straight views for close, strongly bent tags, at this fraction of the resolution; 0: off
