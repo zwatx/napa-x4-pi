@@ -47,12 +47,13 @@ def test_tag_across_the_seam_is_found_only_by_the_seam_search():
     assert worst_corner_error(c, truth[3][0]) < 0.3
 
 
-def test_bearing_and_pose_match_where_the_tag_was_put():
-    img, truth = frame_with((21, dict(lon_deg=-35, lat_deg=12, distance_m=1.2, turn_deg=30)))
+@pytest.mark.parametrize("lon", [-35, 150])  # in the front lens's half and in the back lens's
+def test_bearing_and_pose_match_where_the_tag_was_put(lon):
+    img, truth = frame_with((21, dict(lon_deg=lon, lat_deg=12, distance_m=1.2, turn_deg=30)))
     det = X4TagDetector()
     tag = by_id(det.detect(img))[21]
     az, el = tag.bearing_deg()
-    assert az == pytest.approx(-35, abs=0.3) and el == pytest.approx(12, abs=0.3)
+    assert az == pytest.approx(lon, abs=0.3) and el == pytest.approx(12, abs=0.3)
     rot, t, err = det.pose(tag, 0.1651)
     np.testing.assert_allclose(t, truth[21][1], atol=0.012)  # within 1% of 1.2 m
     assert err < 1.0
