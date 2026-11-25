@@ -101,7 +101,9 @@ def fit_latency(times, angles, motion: dict, lo_s: float = 0.0, hi_s: float = 0.
         x, ph = motion_x(times - lat, motion)
         right, left = np.abs(ph - 0.25) < 0.2, np.abs(ph - 0.75) < 0.2
         keep = right | left
-        if right.sum() < 15 or left.sum() < 15:  # one direction alone can't tell latency from the screen's shape
+        # One direction alone can't tell latency from the screen's shape; with both seen, each is about half (a wrong
+        # latency can push a few frames of one direction past a turn, so a handful isn't enough).
+        if min(right.sum(), left.sum()) < max(15, 0.25 * keep.sum()):
             return None
         c = np.polyfit(x[keep] - motion["cx_px"], angles[keep], 3)
         r = angles[keep] - np.polyval(c, x[keep] - motion["cx_px"])
@@ -110,6 +112,8 @@ def fit_latency(times, angles, motion: dict, lo_s: float = 0.0, hi_s: float = 0.
     best = None
     for grid in (np.arange(lo_s, hi_s, 0.002), None):
         if grid is None:  # refine around the coarse best
+            if best is None:
+                return None
             grid = np.arange(best[0] - 0.003, best[0] + 0.003, 0.0001)
         for lat in grid:
             f = cost(lat)
