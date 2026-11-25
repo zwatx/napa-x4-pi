@@ -130,10 +130,12 @@ class Stats:
         if now - self.t0 >= self.every_s:
             r = np.array(self.rows)
             temp = cpu_temp_c()
+            clock = getattr(source, "clock", None)
             log.info("%.1f fps | decode %.1f detect %.1f (p95 %.1f) age %.1f (p95 %.1f) ms | tags/frame %.2f | "
-                     "camera frames skipped %d, corrupt %d | errors %d%s",
+                     "camera frames skipped %d, corrupt %d | errors %d%s%s",
                      len(r) / (now - self.t0), np.median(r[:, 0]), np.median(r[:, 1]), np.percentile(r[:, 1], 95),
                      np.median(r[:, 2]), np.percentile(r[:, 2], 95), r[:, 3].mean(), source.dropped, source.corrupt, self.errors,
+                     "" if clock is None else f" | frame clock {'on' if clock.locked else 'off (arrival times)'}",
                      "" if temp is None else f" | {temp:.0f} C")
             self.t0, self.rows = now, []
 

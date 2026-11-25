@@ -66,7 +66,8 @@ whatever the buffer count. Frames are about 216 kB of baseline 4:2:0 JPEG with n
 be split up and decoded in parallel. Grey decoding took 8.6 ms, and results went out 11 ms after a frame arrived.
 From a change in front of the camera to its frame arriving took 154-163 ms median, over three runs of 20-30 screen
 flips (146-176 ms from the 10th to the 90th percentile). That includes the laptop screen's own delay, which leaves
-about 140 ms for the camera. The default `latency_ms` is 140.
+about 140 ms for the camera. Frame times now come from V4L2, which stamps the start of each frame's USB transfer
+about 5 ms earlier, so the default `latency_ms` is 135.
 
 **The live X4, on a Pi 5.** Plugged into the Pi (USB 2 is enough), with four printed tags taped around a room 1-4 m
 away, `min_tag_px = 16` and the field pose on, the service ran at 28.4 fps in the 360-degree mode. Decoding took
@@ -78,13 +79,22 @@ the two the 1080 mode sees, well inside the published 5 mm and 45 mm. Over 4,200
 it, nothing was reported. On a practice field, three tags on a board whose centres are marked 17 1/4 in apart, seen
 from 1.3 m in the 1080 mode, came out 17.45 and 17.25 in apart.
 
+**Frame times.** The X4 captures on a steady clock (29.97 fps) but its frames reach the Pi late by an uneven
+amount, in a repeating pattern of three: in the 360-degree mode about 16, 9 and 0 ms late plus noise, so timing each
+frame by its arrival made its timestamp jitter by about 6 ms (standard deviation), 2 cm at 3 m/s. The service fits
+the camera's clock to the arrivals over the last 20 s and stamps each frame on it, keeping the arrivals' average so
+`latency_ms` still applies: on three recorded minutes that left 0.2-0.5 ms of jitter (1.7 ms at worst). It locks on
+after about 3 s and lets go when frames stop fitting a steady clock. In the 1080 mode some frames arrive more than a
+frame period late, so which tick a frame belongs to can't be told; frames there keep their arrival times, which
+jitter by about 13 ms.
+
 **The 1920x1080 mode** (`[camera] mode = "dual1080"`, see [Hardware](#hardware)). The same screen flips took 133 ms,
-about 115 ms for the camera, which is that mode's default. Its picture has 615 px per radian at the middle of each
-view and about 820 at 60 degrees to either side, against 458 in the 360-degree mode. A tag stays above the 16 px
-minimum out to 6.3-8.5 m instead of 4.7 m. With 13 tags on a screen in view, decoding took 2.7 ms against 4.7,
-detection took about 5.4 ms in both, and corner directions agreed with the 360-degree mode's to 0.18 px median and
-0.57 px at worst. On the Pi 5, with the rendered room frames resampled into this layout and the field pose on at
-30 fps:
+about 115 ms for the camera (112 against V4L2's stamps, that mode's default). Its picture has 615 px per radian
+at the middle of each view and about 820 at 60 degrees to either side, against 458 in the 360-degree mode. A tag
+stays above the 16 px minimum out to 6.3-8.5 m instead of 4.7 m. With 13 tags on a screen in view, decoding took
+2.7 ms against 4.7, detection took about 5.4 ms in both, and corner directions agreed with the 360-degree mode's to
+0.18 px median and 0.57 px at worst. On the Pi 5, with the rendered room frames resampled into this layout and the
+field pose on at 30 fps:
 
 | | 1080 mode | 360-degree mode |
 |---|---|---|
@@ -155,7 +165,7 @@ with the X4 plugged into any Linux computer that has a screen and this package i
 2. **How late are frames?** Run the check below, open the page it serves in a browser on the same computer, full
    screen, and point the X4 at the screen. The page flips a tag's ID, and the check times how long the change takes
    to arrive. That time includes the screen's own delay, typically 17-50 ms, so it's an upper bound. Put the median,
-   less your screen's delay, in `[camera] latency_ms`. One X4 measured about 140 ms, which is the default. Close any
+   less your screen's delay, in `[camera] latency_ms`. One X4 measured about 135 ms, which is the default. Close any
    browser or system pop-ups first, because one covering the tag hides it.
 
    ```sh

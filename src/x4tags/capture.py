@@ -14,12 +14,170 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 
 import cv2
 import numpy as np
 
 X4_USB_VENDOR = "2e1a"
 log = logging.getLogger(__name__)
+
+
+# How early (in frame periods) a frame may seem to arrive and still count as on time: room for the clock's own
+# estimate to wander between refits.
+EARLY = 0.06
+
+
+class FrameClock:
+    """Steady frame times from late, uneven arrival times.
+
+    The X4 captures on a steady clock (29.97 fps on one camera) but delivers its frames late by an uneven amount,
+    in a repeating pattern of three: on a Pi 5, about 16, 9 and 0 ms late at 2880x1440 and 26, 3 and 0 ms at
+    1920x1080, plus noise. A frame can't arrive early, so the lower edge of arrival time against frame number is the
+    camera's clock. This finds that clock (period and phase), numbers each frame by its slot on it, refits the line
+    by least squares over the last ``window_s`` seconds, and returns each frame's slot time plus the window's mean
+    delay: on average the same as the arrival times, so a latency measured from arrivals still applies, but without
+    the frame-to-frame jitter.
+
+    Until it has locked on (``lock_frames``, ~3 s) it returns arrival times unchanged. A frame late enough to land
+    in the previous frame's slot (over a period late) takes the next slot, since the camera seldom drops frames,
+    unless that slot starts after the frame arrived (the frame before it was the late one); the times returned always
+    increase. When frames that had to be moved, or came later than any frame did while locking on, plus half the
+    slots nothing arrived for, add up to more than ``max_misfit`` of the last 90 frames, the camera no longer runs on
+    this clock (a new frame rate, say) and it starts over. It doesn't lock on at all when frames arrive 80% of a
+    period late or more (the X4's 1920x1080 mode on a Pi 5): a frame's slot would be a guess.
+    """
+
+    def __init__(self, fps: float = 30.0, window_s: float = 20.0, lock_frames: int = 90, refit_every: int = 10,
+                 max_misfit: float = 0.15):
+        self.nominal = 1.0 / fps
+        self.window_s, self.lock_frames, self.refit_every = window_s, lock_frames, refit_every
+        self.max_misfit = max_misfit
+        self._prev = -np.inf  # last time returned
+        self._retry = refit_every  # frames between tries to lock on; doubles after each failure, up to 10 s
+        self.reset()
+
+    def reset(self) -> None:
+        self._t: deque[float] = deque()
+        self._n: deque[int] = deque()
+        self._events: deque[float] = deque(maxlen=90)  # 1 for a frame that didn't fit, 0.5 for a slot left empty
+        self.period: float | None = None  # seconds per frame, once locked
+        self.delay = 0.0  # mean delay above the clock's edge, seconds
+        self._a, self._last_n, self._late_max, self._since_fit = 0.0, 0, 0.0, 0
+
+    @property
+    def locked(self) -> bool:
+        return self.period is not None
+
+    def __call__(self, t: float) -> float:
+        out = self._stamp(t)
+        if out <= self._prev:  # e.g. back to arrival times after losing the clock
+            out = self._prev + 1e-4
+        self._prev = out
+        return out
+
+    def _stamp(self, t: float) -> float:
+        if self._t and t - self._t[-1] > 1.0:  # a stall: the camera may have restarted its clock
+            self.reset()
+        if self.period is None:
+            self._t.append(t)
+            if len(self._t) > self.lock_frames:
+                self._t.popleft()
+            self._since_fit += 1
+            if len(self._t) < self.lock_frames or self._since_fit < self._retry:
+                return t
+            if not self._lock():
+                self._retry = min(2 * self._retry, 300)
+                return t
+            self._retry = self.refit_every
+            return self._a + self._last_n * self.period + self.delay
+        x = (t - self._a) / self.period
+        n = int(np.floor(x + EARLY))
+        fits = n > self._last_n and x - n <= self._late_max
+        if fits:  # a slot nothing arrived for counts half: frames do get dropped, but not often
+            self._events.extend([0.5] * min(n - self._last_n - 1, 10))
+        self._events.append(0.0 if fits else 1.0)
+        if sum(self._events) > self.max_misfit * self._events.maxlen:
+            log.info("frame clock lost: arrivals no longer fit a steady %.3f fps", 1 / self.period)
+            self.reset()
+            self._t.append(t)
+            return t
+        if not fits:
+            # Late enough to land in the last frame's slot (or later than any frame while locking on): frames are
+            # seldom dropped, so it takes the next slot, unless that slot only starts after the frame arrived; then
+            # the frame before was a very late one that took this frame's slot, and this one keeps its arrival time.
+            # Either way it stays out of the fit.
+            m = max(n, self._last_n + 1)
+            if x < m - EARLY:
+                self._last_n = n
+                return t
+            self._last_n = m
+            return self._a + m * self.period + self.delay
+        self._last_n = n
+        self._t.append(t)
+        self._n.append(n)
+        while self._t[0] < t - self.window_s:
+            self._t.popleft()
+            self._n.popleft()
+        self._since_fit += 1
+        if self._since_fit >= self.refit_every and not self._fit():
+            self.reset()
+            return t
+        return self._a + n * self.period + self.delay
+
+    def _lock(self) -> bool:
+        """Find the period (within 1.5% of nominal) that bunches the arrivals' phases tightest, then the edge: the
+        frame taken as on time that puts every frame in a slot of its own and leaves the fewest slots empty."""
+        self._since_fit = 0
+        t = np.asarray(self._t)
+        rel = t - t[0]
+        periods = self.nominal * np.linspace(0.985, 1.015, 601)
+        ph = np.mod(rel[None, :], periods[:, None]) / periods[:, None]
+        s = np.sort(ph, axis=1)
+        gaps = np.diff(np.concatenate([s, s[:, :1] + 1.0], axis=1), axis=1)  # empty arcs between phases, circular
+        best = int(gaps.max(1).argmax())
+        if gaps[best].max() < 0.04:  # phases all over the period: no steady clock to find
+            return False
+        period = float(periods[best])
+        x = rel / period
+        edges = np.unique(np.round(ph[best], 4))  # each phase seen, as the on-time one
+        n = np.floor(x[None, :] - edges[:, None] + EARLY)
+        steps = np.diff(n, axis=1)
+        shared = (steps <= 0).sum(1)
+        empty = np.where(steps > 1, steps - 1, 0).sum(1)
+        k = int(np.argmin(shared * 1000 + empty))
+        if shared[k] or empty[k] > self.max_misfit * len(t):
+            return False
+        self.period, self._a = period, float(t[0] + edges[k] * period)
+        self._n = deque(int(v) for v in n[k])
+        self._last_n = self._n[-1]
+        if not self._fit():
+            self.reset()
+            return False
+        late = float(((t - self._a) / self.period - np.asarray(self._n)).max())
+        if late > 0.8:  # some frames nearly a period late: which slot a frame belongs to would be a guess
+            log.info("frame clock not used: frames arrive up to %.0f ms late, too close to a frame period",
+                     late * self.period * 1e3)
+            self.reset()
+            return False
+        self._late_max = late + 0.1
+        log.info("frame clock locked: %.3f fps, frames %.1f ms late on average", 1 / self.period, self.delay * 1e3)
+        return True
+
+    def _fit(self) -> bool:
+        """Least-squares line through the window's arrivals against slot number: the delays have a steady mean, so
+        this is the camera's clock plus the mean delay (what ``__call__`` returns). Its lowest point is the clock's
+        edge, which numbers the slots."""
+        self._since_fit = 0
+        t, n = np.asarray(self._t), np.asarray(self._n, float)
+        n0 = n[0]  # fit about the window's first frame, for precision
+        slope, icept = np.polyfit(n - n0, t, 1)
+        if abs(slope / self.nominal - 1) > 0.02:
+            return False
+        low = float((t - (icept + (n - n0) * slope)).min())
+        self._a, self.period = float(icept + low - n0 * slope), float(slope)
+        self.delay = -low
+        return True
 
 
 def find_x4_device() -> str | None:
@@ -82,6 +240,7 @@ class X4Webcam:
 
     A background thread reads each JPEG and decodes it as it arrives, on its own core, while the caller works on
     the previous frame. ``reduce``: 1 for full 2880x1440, 2 for libjpeg's built-in half-size decode (1440x720).
+    Frame times are arrival times (V4L2's own, when it gives them), steadied by a ``FrameClock``.
     """
 
     def __init__(self, device: str | None = None, width: int = 2880, height: int = 1440, fps: int = 30,
@@ -110,6 +269,7 @@ class X4Webcam:
         self._running = True
         self.corrupt = 0
         self.last_decode_ms = 0.0
+        self.clock = FrameClock(fps)
         self._thread = threading.Thread(target=self._grab, name="x4-grab", daemon=True)
         self._thread.start()
 
@@ -125,6 +285,11 @@ class X4Webcam:
                 if not ok:
                     time.sleep(0.005)
                     continue
+                # V4L2's buffer time, on the same clock: when the frame's USB transfer began (3-6 ms before read()
+                # returns on a Pi 5), and not held up by this thread being busy decoding the previous frame.
+                kernel = self._cap.get(cv2.CAP_PROP_POS_MSEC) / 1e3
+                if t - 0.5 < kernel <= t:
+                    t = kernel
                 t0 = time.perf_counter()
                 try:
                     gray = self.decode(buf)
@@ -135,12 +300,12 @@ class X4Webcam:
                     if self.corrupt in (1, 10, 100) or self.corrupt % 1000 == 0:
                         log.warning("%d corrupt frames from %s so far", self.corrupt, self.device)
                     continue
-                self._frames.put(t, gray, (time.perf_counter() - t0) * 1e3)
+                self._frames.put(self.clock(t), gray, (time.perf_counter() - t0) * 1e3)
         finally:
             self._cap.release()  # only here, so it never happens in the middle of a read
 
     def read(self, timeout: float = 1.0):
-        """(arrival time from time.monotonic(), grey frame) for the newest frame not yet returned."""
+        """(arrival time on time.monotonic()'s clock, steadied; grey frame) for the newest frame not yet returned."""
         t, gray, self.last_decode_ms = self._frames.get(timeout, self.device)
         return t, gray
 
