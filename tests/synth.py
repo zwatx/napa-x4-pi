@@ -67,8 +67,8 @@ def add_tag_at(img: np.ndarray, tag_id: int, centre: np.ndarray, ex: np.ndarray,
     outline = project(edge[:, 0], edge[:, 1])
     cu = ray_to_pixel(centre, width, height)[0]
     outline[:, 0] = unwrap_near(outline[:, 0], cu, width)
-    u0, u1 = int(math.floor(outline[:, 0].min())) - 2, int(math.ceil(outline[:, 0].max())) + 2
-    v0, v1 = max(0, int(math.floor(outline[:, 1].min())) - 2), min(height - 1, int(math.ceil(outline[:, 1].max())) + 2)
+    u0, u1 = math.floor(outline[:, 0].min()) - 2, math.ceil(outline[:, 0].max()) + 2
+    v0, v1 = max(0, math.floor(outline[:, 1].min()) - 2), min(height - 1, math.ceil(outline[:, 1].max()) + 2)
     us, vs = np.arange(u0, u1 + 1), np.arange(v0, v1 + 1)
     offs = (np.arange(ss) + 0.5) / ss - 0.5
     background = img[np.ix_(vs, np.mod(us, width))]
@@ -98,8 +98,10 @@ def add_tag_at(img: np.ndarray, tag_id: int, centre: np.ndarray, ex: np.ndarray,
     return truth
 
 
-def to_u8(img: np.ndarray) -> np.ndarray:
-    return np.clip(img + 0.5, 0, 255).astype(np.uint8)
+def to_u8(img: np.ndarray, gamma: float = 2.0) -> np.ndarray:
+    """The linear render as the X4 delivers it: encoded with a gamma (the detector's default undoes 2.0)."""
+    lin = np.clip(img, 0, 255) / 255.0
+    return np.clip(255.0 * lin ** (1.0 / gamma) + 0.5, 0, 255).astype(np.uint8)
 
 
 def worst_corner_error(corners: np.ndarray, truth: np.ndarray, width: int = W) -> float:

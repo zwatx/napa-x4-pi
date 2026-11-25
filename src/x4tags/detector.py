@@ -16,6 +16,7 @@ runs on the frame, tags across the line between the halves are dropped, and bent
 
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 
@@ -25,6 +26,8 @@ from napa_vision import NapaDetector
 
 from .dual import DualView
 from .equirect import TangentView, angular_radius, pixel_to_ray, ray_to_pixel, side_bow_px, tangent_basis, unwrap_near
+
+log = logging.getLogger(__name__)
 
 
 # The X4 is two cameras back to back: the front half of its picture (z > 0) is seen from its front lens's centre and
@@ -60,12 +63,23 @@ class X4Tag:
     seam: bool  # found in the seam strip
     near: bool = False  # found in the low-resolution straight views (close tags the frame bends too much)
     extra: dict = field(default_factory=dict)
+    _center: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __setattr__(self, name, value):
+        if name == "rays":  # new corners: the centre is worked out again
+            object.__setattr__(self, "_center", None)
+        object.__setattr__(self, name, value)
 
     @property
     def center_ray(self) -> np.ndarray:
         """Direction of the tag's true centre: where its diagonals cross, in a flat view of the sphere around the tag
         (straight lines stay straight there, so this is exact for a flat tag; the mean of the corner rays is not, by
         up to a degree or so for close, turned tags)."""
+        if self._center is None:
+            self._center = self._find_center()
+        return self._center
+
+    def _find_center(self) -> np.ndarray:
         m = self.rays.sum(0)
         basis = tangent_basis(m)
         local = self.rays @ basis.T
@@ -86,9 +100,11 @@ class X4Tag:
 
 
 class X4TagDetector:
-    """``detect(gray)`` on a stitched X4 frame (2:1). Extra keyword arguments go to ``NapaDetector``. Use one per
-    thread: it keeps state between frames, and in "equirect" mode runs the seam and near searches on a worker thread
-    of its own with a second NapaDetector (so ``threads`` applies to each).
+    """``detect(gray)`` on a stitched X4 frame (2:1). Extra keyword arguments go to ``NapaDetector``; two have
+    defaults for the X4 here: ``min_tag_px=16`` (far field tags are 16-22 px in the 360-degree picture) and
+    ``camera_gamma=2.0`` (the X4's picture isn't linear in light; ``None`` for a linear one). Use one per thread: it
+    keeps state between frames, and in "equirect" mode runs the seam and near searches on a worker thread of its own
+    with a second NapaDetector (so ``threads`` applies to each). ``close()`` (or ``with``) frees both.
 
     ``mode``: "equirect" for the 360-degree 2880x1440 picture (or a reduced decode of it), "dual1080" for the
     1920x1080 front/back picture (or a reduced decode); the seam and near-view searches apply to "equirect" only.
@@ -114,6 +130,7 @@ class X4TagDetector:
             raise ValueError(f"mode {mode!r}: expected one of {', '.join(self.MODES)}")
         self.mode = mode
         self._dual: DualView | None = None
+        napa_kwargs = {"min_tag_px": 16, "camera_gamma": 2.0, **napa_kwargs}
         self.napa = NapaDetector(**napa_kwargs)
         self._napa_kwargs = napa_kwargs
         self._side_napa: NapaDetector | None = None  # the seam and near searches' own detector, on a worker thread
@@ -124,6 +141,23 @@ class X4TagDetector:
         self._near_views = {}  # (width, height) -> [(TangentView, map1, map2)]
         self._near_next = 0  # next view in the rotation
         self._near_hits: set[int] = set()  # views that found a close tag on the previous call
+        self._side_errors = 0
+
+    def close(self) -> None:
+        """Stop the worker thread and free the NAPA detectors."""
+        if self._pool is not None:
+            self._pool.shutdown(wait=True)
+            self._pool = None
+        for napa in (self._side_napa, self.napa):
+            if napa is not None and hasattr(napa, "close"):
+                napa.close()
+        self._side_napa = None
+
+    def __enter__(self) -> X4TagDetector:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     def projection(self, width: int, height: int) -> DualView | None:
         """The frame's geometry for "dual1080" (None for the equirect frame, handled by ``x4tags.equirect``)."""
@@ -159,7 +193,13 @@ class X4TagDetector:
                 wait([side])
             raise
         if side is not None:
-            seam, near = side.result()
+            try:
+                seam, near = side.result()
+            except Exception:  # the full-frame tags still count
+                self._side_errors += 1
+                if self._side_errors in (1, 10, 100) or self._side_errors % 1000 == 0:
+                    log.warning("seam/near search failed (%d times so far)", self._side_errors, exc_info=True)
+                seam, near = [], []
             tags += [t for t in seam if not _seen(t, tags, 1.0)]
             tags += self._keep_near(near, tags)
         if self.refine_bow_px is not None:
@@ -282,7 +322,8 @@ class X4TagDetector:
         centre = tag.rays.sum(0)
         half_angle = min(np.radians(75.0), angular_radius(tag.rays, centre) * self.view_margin)
         lat = np.arcsin(np.clip(-centre[1] / np.linalg.norm(centre), -1, 1))
-        if projection is None and abs(lat) + np.sqrt(2) * half_angle > np.radians(88.0):  # the view would reach over a pole
+        # the view would reach over a pole
+        if projection is None and abs(lat) + np.sqrt(2) * half_angle > np.radians(88.0):
             tag.extra["refine"] = "too near a pole"
             return
         # The frame's own scale (pixels per radian of latitude), or less for big tags so the view stays under
@@ -329,22 +370,23 @@ class X4TagDetector:
     def pose(tag: X4Tag, tag_size_m: float, frame_height: int = 1440, px_per_rad: float | None = None):
         """Tag pose in the camera frame (x right, y down, z forward), from a pinhole view centred on the tag.
 
-        Returns (R 3x3, t 3, worst corner reprojection error in pixels at the frame's scale) for the lower-error IPPE
-        solution, or None. t is the tag's centre from the middle of the camera body (the pose is found from the centre
-        of the lens that sees the tag, ``lens_centre``, and moved by it). The error is in pixels of ``px_per_rad`` (default: the equirect
-        frame's, ``frame_height / pi``). R's columns are the tag's axes in the camera frame, with OpenCV's
-        square corners for NAPA's corner order (corner 0 is the printed bottom-right of ``napa_vision.tags.tag_image``):
-        x towards the printed left edge, y towards the printed bottom, z out of the printed face. A tag seen nearly
-        face-on has two close IPPE solutions; the chosen one can be tilted a few degrees the wrong way.
+        Returns (R 3x3, t 3, worst corner reprojection error in pixels at the frame's scale) for the lower-error
+        IPPE solution, or None. t is the tag's centre from the middle of the camera body (the pose is found from the
+        centre of the lens that sees the tag, ``lens_centre``, and moved by it). The error is in pixels of
+        ``px_per_rad`` (default: the equirect frame's, ``frame_height / pi``). R's columns are the tag's axes in the
+        camera frame, with OpenCV's square corners for NAPA's corner order (corner 0 is the printed bottom-right of
+        ``napa_vision.tags.tag_image``): x towards the printed left edge, y towards the printed bottom, z out of the
+        printed face. A tag seen nearly face-on has two close IPPE solutions; the chosen one can be tilted a few
+        degrees the wrong way.
         """
-        basis = TangentView(tag.center_ray, 1.0, 1, 2, 1).basis  # rows: right, down, forward
+        basis = tangent_basis(tag.center_ray)  # rows: right, down, forward
         local = tag.rays @ basis.T
         q = local[:, :2] / local[:, 2:3]
         half = tag_size_m / 2
         obj = np.array([[-half, half, 0], [half, half, 0], [half, -half, 0], [-half, -half, 0]], float)
-        n, rvecs, tvecs, errs = cv2.solvePnPGeneric(obj, q, np.eye(3), None, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+        _, rvecs, tvecs, _ = cv2.solvePnPGeneric(obj, q, np.eye(3), None, flags=cv2.SOLVEPNP_IPPE_SQUARE)
         best = None
-        for rv, tv in zip(rvecs, tvecs):
+        for rv, tv in zip(rvecs, tvecs, strict=True):
             if tv[2, 0] <= 0:
                 continue
             proj, _ = cv2.projectPoints(obj, rv, tv, np.eye(3), None)
