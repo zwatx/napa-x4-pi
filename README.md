@@ -1,397 +1,320 @@
 # napa-x4-pi
 
-Reads AprilTags from an Insta360 X4's 360-degree webcam stream on a Raspberry Pi and sends them to the robot over
-NetworkTables. It's a starting point for a vision coprocessor built around one camera that sees all the way around.
+Reads AprilTags from an Insta360 X4's 360-degree webcam stream on a Raspberry Pi 5 and sends them, with a field pose
+from every tag in view, to an FRC robot over NetworkTables. Detection is [NAPA](https://pypi.org/project/napa-vision/)
+(`napa-vision`), unchanged; this repository adds what the X4's picture needs and the robot plumbing.
 
-Detection is [NAPA](https://pypi.org/project/napa-vision/) (`napa-vision`), unchanged. This repository adds what the
-X4's picture needs, and the robot plumbing.
+Version 0.2.0. Tested with one X4 on a Pi 5 (Debian 13, Python 3.13), NAPA 0.6.1 and pyntcore 2026. See the
+[changelog](CHANGELOG.md).
 
-## What it adds
+![Tags on a monitor seen by the X4, across the stitch between its two lenses](docs/stitch.jpg)
 
-- **Grey capture.** In webcam mode the X4 sends MJPEG. `X4Webcam` decodes each JPEG straight to grey instead of
-  decoding colour and converting it afterwards. On a Pi 5 that halves the decode time: 25 to 11 ms for a 2880x1440
-  frame from the X4, 34 to 18 ms for busier test frames. Decoding runs in its own thread on another core, and only
-  the newest frame is kept, so the loop never falls behind.
-- **The seam.** The 360-degree picture is equirectangular, so its left and right edges both look straight back. A tag
-  on that line is cut in two and NAPA can't read it, so x4tags also searches a strip made of both edges side by side.
-- **Bent tags.** The 360-degree picture bends straight lines, more so for big tags and for tags far above or below the
-  horizon. When a tag's sides bow by more than 0.2 px, x4tags looks at it again through a small flat (pinhole) view
-  centred on the tag, where the sides are straight, and maps the corners back.
-- **Close tags.** Closer than about half a metre, a tag's sides bow by 5-40 px and NAPA can't find it in the
-  360-degree picture at all. Twelve low-resolution flat views, centred on the corners of an icosahedron, cover the
-  sphere for these. Each frame searches two of them in rotation, plus any view that found a tag on the previous frame.
-- **Robot frame.** Each tag's yaw and pitch from the robot, and, given the tag size, its distance and pose. All of it
-  is in WPILib's robot frame (x forward, y left, z up), through the camera's mount position.
-- **Field pose.** Given a WPILib AprilTag field layout, one pose fitted to the corners of every visible tag at once. A
-  camera that sees tags all around pins its position down far better than any single tag can. The fit needs at least
-  two tags, because one tag's pose is ambiguous, and it leaves out tags that don't fit, such as a misread ID. Each
-  pose comes with covariances for a pose estimator.
-- **Outputs.** NetworkTables 4, JSON over UDP, or JSON lines on stdout. NetworkTables values carry the time the frame
-  was taken: its arrival time minus the configured camera latency.
-- **Service.** A systemd unit starts it at boot and restarts it if it fails. The loop reconnects when the camera drops
-  out and skips frames that fail, and logs both.
-- **Camera checks.** Two tools measure the X4's latency and whether its picture stays fixed to the camera body. See
-  [Before relying on it](#before-relying-on-it).
+*One X4 frame: tags on a monitor 0.6 m away, outlined by the lens that sees them. Each half of the picture comes
+from its own lens, 28 mm apart; the column on the stitch, seen by both, is blended and doubled.*
 
-## Measured
+## Is it for you?
 
-On rendered 360-degree frames with exact corners: 64 frames and 481 tags from 10 to 360 px, with real HDR
-backgrounds, sensor noise, motion blur, defocus, glare and shadows.
+- **It sees all around.** Tags behind and beside the robot count too, and a pose from tags all around is far
+  steadier than one from tags in front: on a still camera it wanders by about 1 mm.
+- **It's accurate where it can see.** Against tags at exactly known places, the fit was 0.22 px.
+- **Range is short.** The 360 mode has 0.125 degrees per pixel, so a 6.5 in FRC tag is 16 px (the smallest it looks
+  for) at 4.7 m. The 1080 mode reaches 6.3-8.5 m but is blind to each side.
+- **It's slow to see.** The X4 delivers a frame about 100 ms after taking it (75 ms in the 1080 mode), and the Pi
+  adds about 30. Every value carries the time its frame was taken, for latency compensation.
+- **It blurs in dim light.** The X4 chooses its own exposure (about 23 ms in a dim room): a robot turning at 90
+  degrees a second smears tags by about 16 px. Bright competition lighting helps; nothing on the Pi can change it.
+- **Take heading from the gyro.** The X4 stabilizes its picture: after a quick turn its heading lags by a few
+  degrees for several seconds. Use the camera's position from the field pose with the gyro's heading.
+- **Geometry from one camera.** The two-lens model and the 1080 mode's calibration were measured on one X4.
 
-| | NAPA alone | x4tags |
-|---|---|---|
-| Tags found | 179 | 208 (the extra 29 are close, strongly bent tags) |
-| Worst-corner error, median / 95th percentile | 0.50 / 5.5 px | 0.26 / 1.9 px |
-| The same, for tags both find that are bent by over 1.5 px | 1.60 / 9.5 px | 0.23 / 1.7 px |
-| Tags found when each is moved onto the seam | 0 | 200 |
+Measured details: [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md).
+How it works: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 
-**Field pose.** In a rendered 6 m x 4 m room with 12 tags (7-11 in view) and 40 robot poses with blur and noise, the
-camera position was off by 0.2 mm median and 0.3 mm at the 95th percentile. The biggest single tag alone gave 5.6 mm
-and 4.3 cm. That's with perfect geometry, an exact stitch and exactly placed tags. A real camera on a real field will
-do worse.
+## What you need
 
-**Range.** The 360-degree picture has 458 px per radian, or 0.125 degrees per pixel. A face-on FRC tag (0.1651 m) is
-22 px wide at 3.4 m (NAPA's own default minimum) and 16 px at 4.7 m (this service's default). On the rendered
-frames NAPA found 32% of tags at 22-26 px, 54% at 40-56 px and 74% at 80-120 px, through all the blur, glare and tilt
-in those frames.
+- A **Raspberry Pi 5** with 64-bit Raspberry Pi OS or Debian 12 or later. (A Pi 4 is untested.)
+- An **Insta360 X4** in webcam mode, plugged straight into the Pi with a USB-C cable (not through a hub or dock:
+  some power the camera but pass no data).
+- **Power for both.** A Pi 5 gives its USB ports only 600 mA in all unless its supply negotiates 5 A, and the X4
+  charges and streams through that port. Use a 5 V / 5 A supply, or a regulator that can give 5 A with
+  `usb_max_current_enable=1` in `/boot/firmware/config.txt`. On a robot, feed the Pi from a 5 V regulator on the PDH.
+  Check the game manual's rules on cameras with their own batteries.
+- **Robot code** on WPILib 2026 (pyntcore 2026 on the Pi speaks NetworkTables 4).
 
-**Raspberry Pi 5.** The service ran on those frames as quality-90 JPEGs paced at 30 fps, with one detector thread, and
-kept up at 30.0 fps. Decoding took 17.8 ms and detection 14.7 ms (22.9 at the 95th percentile). Results went out
-34 ms after a frame arrived (46 at the 95th percentile), and the Pi held 59 C without throttling. In the room with 11
-tags in view and the field pose on, detection plus the field pose took 15.7 ms, and results went out after 29 ms.
-The X4's own delay for stitching, encoding and USB comes on top of that: about 100 ms, measured below.
-
-**The live X4, on a laptop.** The driver delivers 29.3 fps, unevenly: about five gaps of over 50 ms every second,
-whatever the buffer count. Frames are about 216 kB of baseline 4:2:0 JPEG with no restart markers, so a frame can't
-be split up and decoded in parallel. Grey decoding took 8.6 ms, and results went out 11 ms after a frame arrived.
-From a change in front of the camera to its frame arriving took 154-163 ms median, over three runs of 20-30 screen
-flips (146-176 ms from the 10th to the 90th percentile). That includes the laptop screen's own delay, and timing a
-sudden change also adds about half a frame (see the moving-tag measurement below).
-
-**The live X4, on a Pi 5.** Plugged into the Pi (USB 2 is enough), with four printed tags taped around a room 1-4 m
-away, `min_tag_px = 16` and the field pose on, the service ran at 28.4 fps in the 360-degree mode. Decoding took
-9.5 ms, detection plus the field pose 18.6 ms (with a fifth tag in view that never fits, which the field pose has to
-leave out every frame), and results went out about 28 ms after a frame arrived, using 24% of the four cores at 50 C.
-The 1080 mode ran at 29.7 fps: 6.5 ms decoding, 10.9 ms detection plus the field pose, 13% of the cores. With the
-camera still, the field pose's position wandered by about 1 mm (standard deviation) from four tags and 4.5 mm from
-the two the 1080 mode sees, well inside the published 5 mm and 45 mm. Over 4,200 frames of the room with no tags in
-it, nothing was reported. On a practice field, three tags on a board whose centres are marked 17 1/4 in apart, seen
-from 1.3 m in the 1080 mode, came out 17.45 and 17.25 in apart.
-
-**Tags at known places.** Eight tags shown on a 27-inch monitor at known positions (75 mm squares, 149-168 mm
-apart, from the panel's pixel pitch), 0.5-0.8 m from the X4 and up to 28 degrees above its horizon, checked the
-picture's geometry directly. The field pose fitted all seven tags it saw to within 0.25 px (0.13-0.35 px per tag), so
-the 360-degree picture has no error there beyond the corners' own; its camera position wandered by under 0.1 mm.
-Without the refinement of bent tags the fit was 0.37 px. Undoing a gamma of 2.0 (`[detector] camera_gamma`, below)
-brought it to 0.22 px. Spacings worked out from single tags' own poses came within -1.5 to +3.9 mm of the truth.
-
-**At the stitch.** With the X4 turned so the same eight tags sat 93-115 degrees to its side, by the line where it
-joins its two lenses' pictures (90 degrees from straight ahead), the tags more than 10 degrees from that line fitted
-as well as in front (0.13-0.24 px), but the two 3.5 degrees from it were shifted about 3 px and bent by about 1.7 px.
-The lenses see from slightly different places, so this varies with distance (1 m here). Those two tags made the field
-pose fail outright; now corners near the stitch count as up to 8 times less certain, fading to normal 10 degrees
-away, and the pose used all eight tags, 1.3 mm from the pose fitted to the far tags alone.
-
-**Two lenses, two centres.** With the tags across the stitch (on a denser grid, 21 tags), the two halves of the
-picture disagreed by 11-13 px at 1 m and about 20 px at 0.6 m: the X4's lenses sit back to back, and each half of
-the picture is seen from its own lens's centre, about 28 mm apart (14 mm either side of the body's middle, measured at
-both distances; sideways offsets came out at about 0.2 mm). Treated as one centre, tags on both sides of the camera gave
-no field pose at all at those distances, and would be about 4 px apart at 3 m. The field pose and single tags' poses
-now take each corner from its own lens: every frame at 1 m got a pose from all 19 tags in view (0.39 px), and at
-0.6 m, 18 of 20 frames from all 17 (0.57 px). Tag positions are from the middle of the camera body.
-
-**Latency, from a moving tag.** On the same 120 Hz monitor a tag slid back and forth at a known speed, timed by the
-browser's clock synced to the Pi's over Wi-Fi (to within 7-9 ms). Where the tag was in each frame says when the frame
-was taken. Against the service's frame times that came out at 120 and 121 ms in the 360-degree mode (the tag at two
-heights) and 98 ms in the 1080 mode, each including the monitor's own delay: one or two refreshes, the scan-out down
-to the tag and the pixels' response, about 20 ms (23 ms for the 1080 run's lower tag). So the X4's own latency is
-about 100 and 75 ms, give or take 8, the defaults. Flipping the tag instead read 144 ms on this monitor: a flip lands
-anywhere in the camera's frame interval and shows only from the next frame, so that way reads about half a frame
-(17 ms) plus half the exposure too long. The moving tag also showed that frames are taken on a steady clock: single
-frames' times scatter 1.3-1.7 ms around the fit with the frame clock on, against 7.5 ms using V4L2's stamps as they
-come. The tag's edges smeared by 17.5 px for every 1000 px/s it moved across the picture, so the X4 exposed for
-about 23 ms in that room: a robot turning at 90 degrees a second would smear tags by about 16 px. Brighter light
-shortens it; the webcam stream has no exposure setting.
-
-**Frame times.** The X4 captures on a steady clock (29.97 fps) but its frames reach the Pi late by an uneven
-amount, in a repeating pattern of three: in the 360-degree mode about 16, 9 and 0 ms late plus noise, so timing each
-frame by its arrival made its timestamp jitter by about 6 ms (standard deviation), 2 cm at 3 m/s. The service fits
-the camera's clock to the arrivals over the last 20 s and stamps each frame on it, keeping the arrivals' average so
-`latency_ms` still applies: on three recorded minutes that left 0.2-0.5 ms of jitter (1.7 ms at worst). It locks on
-after about 3 s and lets go when frames stop fitting a steady clock. In the 1080 mode some frames arrive more than a
-frame period late, so which tick a frame belongs to can't be told; frames there keep their arrival times, which
-jitter by about 13 ms.
-
-**The 1920x1080 mode** (`[camera] mode = "dual1080"`, see [Hardware](#hardware)). The same screen flips took 133 ms;
-the moving tag puts that mode's latency at about 75 ms, its default. Its picture has 615 px per radian
-at the middle of each view and about 820 at 60 degrees to either side, against 458 in the 360-degree mode. A tag
-stays above the 16 px minimum out to 6.3-8.5 m instead of 4.7 m. With 13 tags on a screen in view, decoding took
-2.7 ms against 4.7, detection took about 5.4 ms in both, and corner directions agreed with the 360-degree mode's to
-0.18 px median and 0.57 px at worst. On the Pi 5, with the rendered room frames resampled into this layout and the
-field pose on at 30 fps:
-
-| | 1080 mode | 360-degree mode |
-|---|---|---|
-| Decoding | 5.9 ms | 13.3 ms |
-| Detection | 18.1 ms (more tags need straightening) | 16.5 ms |
-| Tags per frame | 8.8 (the blind gaps) | 11.1 |
-| Results out after a frame arrives | 24 ms | 30 ms |
-
-## Hardware
-
-- A Raspberry Pi 5 with 64-bit Raspberry Pi OS or Debian 12 or later. A Pi 4 should work, more slowly.
-- An Insta360 X4 in **webcam mode** (from the USB menu on the camera), plugged **straight into the Pi**. Don't go
-  through a hub or dock, because some docks power the camera but never pass data. In webcam mode it's an ordinary UVC
-  camera, and `x4tags` finds it by its USB vendor ID. If it falls back to USB-drive mode, choose webcam mode again on
-  the camera.
-- A supply that can give 5 V at 3 A. The X4 heats up when it charges and streams at the same time.
-
-The default is the X4's 2880x1440 360-degree output. Its other webcam size, 1920x1080, works too
-(`[camera] mode = "dual1080"`). That picture is two views stacked, the back above the front, and each covers 76
-degrees to either side and 24 degrees up and down at its middle. It's sharper and faster. It's also blind for 28
-degrees on each side of the camera and to anything high or low, so a tag 1.4 m above the camera drops out of view
-closer than about 3 m. Insta360 doesn't publish this mode's geometry. `x4tags/dual.py` holds a calibration of one
-X4, good to about 0.3 px on measurements the fit didn't see. Another X4, or new firmware, may differ.
-
-## Install on the Pi
+## Quick start
 
 ```sh
 git clone https://github.com/zwatx/napa-x4-pi && cd napa-x4-pi
-deploy/install.sh            # venv, /etc/x4tags.toml, systemd service (asks for sudo for those)
-sudo nano /etc/x4tags.toml   # set [mount], [tags], [field] and [output], then:
+deploy/install.sh                  # .venv, /etc/x4tags.toml and the service (it asks for sudo for those)
+sudo systemctl stop x4tags         # the service holds the camera; stop it to try things by hand
+.venv/bin/x4tags --print           # camera -> one JSON line per frame
+sudo nano /etc/x4tags.toml         # set [mount], [tags], [field] and [output] (below)
 sudo systemctl restart x4tags && journalctl -u x4tags -f
 ```
 
-`deploy/install.sh --no-service` builds `.venv` and nothing else. It doesn't need sudo if a C compiler and
-python3-venv are already installed. Try it by hand first:
+Every 10 s the log shows the frame rate, decode and detect times, tags per frame, skipped and corrupt frames,
+whether the frame clock is on and the CPU temperature. On the robot side, open AdvantageScope or OutlineViewer and
+look under `/x4tags`.
+
+## Camera setup
+
+**Webcam mode.** Connect the X4 and choose Webcam on its USB menu. It then shows up as an ordinary UVC camera, and
+x4tags finds it by its USB vendor ID. If it comes up as a USB drive instead, the log says so: choose Webcam again.
+Check after a power cycle whether yours remembers the mode.
+
+**Which picture.** The X4's webcam sends one of two sizes, set by `[camera] mode`:
+
+| | 360 mode (`equirect`, default) | 1080 mode (`dual1080`) |
+|---|---|---|
+| Picture | 2880x1440, every direction | 1920x1080: front and back views, 76 degrees to each side, about 24 up and down |
+| Blind to | nothing | 28 degrees on each side of the camera, and anything high or low |
+| Range for a 16 px tag | 4.7 m | 6.3-8.5 m |
+| Latency (default) | 100 ms | 75 ms |
+| Frame times | steadied by the frame clock (jitter about 0.3 ms) | as they arrive (jitter about 13 ms) |
+
+For tags all around a field, use the 360 mode. Turning the camera 45 degrees on the robot puts the 1080 mode's blind
+gaps on the diagonals.
+
+**Mounting.**
+- Put it high enough that the robot doesn't fill the lower half, with neither lens blocked or exposed to hits. The
+  X4 has a 1/4-20 socket.
+- Each half of the picture comes from its own lens. They join on the **stitch**, 90 degrees to each side of the
+  camera, where tags within a few degrees are trusted less. Point the lenses (not the stitch) at where tags matter
+  most.
+- Measure `[mount]` to the **middle of the camera body**, halfway between the two lenses.
+
+**Networking.** Give the Pi a static address on the robot network (for example 10.TE.AM.11) and set
+`[output] nt_server` to your team number. FRC fields allow team traffic on ports 5800-5810 (for the UDP output).
+
+## Check your camera
+
+Two things about the X4 aren't documented and decide how far to trust it. Check them once (stop the service first:
+`sudo systemctl stop x4tags`).
+
+**1. Does the picture follow the camera body?** One X4 followed quick turns within half a second, then the last
+3-8 degrees came back slowly (time constant about 5 s); at rest it was still. No tag is needed:
 
 ```sh
-.venv/bin/x4tags --print                         # camera -> JSON lines
-.venv/bin/x4tags --replay some.mjpg --print      # a recorded MJPEG, or a folder of images
+.venv/bin/python -m x4tags.check_stabilization --tilt   # turn it and let go, then tilt it and let go, when told
 ```
 
-## Before relying on it
+It reports *body-fixed*, *follows ... but creeps*, *heading-locked* or *horizon-locked*. If the horizon is locked,
+leave `[mount]` pitch and roll at 0.
 
-Two things about the X4 aren't documented anywhere, and they decide how far to trust the output. Check both once,
-with the X4 plugged into any Linux computer that has a screen and this package installed.
+**2. How late are frames?**
+1. Run `.venv/bin/python -m x4tags.check_latency --host 0.0.0.0` on the Pi.
+2. Open `http://<the Pi>:8765` in a browser on a laptop (or `http://localhost:8765` on the Pi, with a screen) and
+   click it to go full screen. A tag starts sliding back and forth.
+3. Point the X4 at the screen, the tag at about the camera's height, for 30 s.
+4. It prints the latency, including the screen's own delay: roughly 15-25 ms at 120 Hz, 20-40 ms at 60 Hz. Subtract
+   yours and put the rest in `[camera] latency_ms`.
 
-1. **Does the picture follow the camera body?** Insta360 says the X4 stitches and *stabilizes* its 360-degree webcam
-   output in the camera, and webcam mode has no setting to turn that off. On one X4 (2026-11), the picture followed
-   quick turns within about half a second. The last few degrees, 3-8 after a quick turn by hand, came back slowly,
-   with a time constant of about 5 s. A camera at rest gave a still picture, drifting less than 0.002 degrees in 15 s.
-
-   So for 10-20 s after the robot turns, anything that depends on the picture's heading is a few degrees off. That
-   means bearings to tags, the robot heading in `field_pose`, and through the mount offset the robot position there
-   too. The *camera's* position is barely affected (1-2 mm), because the picture turns about the lenses.
-
-   Take the heading from the robot's gyro and combine it with `field_pose`'s camera position. The Java example under
-   [What the robot sees](#what-the-robot-sees) does this, as does `x4tags.localize.robot_position_from_heading`. To
-   aim at a tag, work from field positions rather than the raw bearing. Firmware may change this, so check your own
-   camera. No tag is needed:
-
-   ```sh
-   .venv/bin/python -m x4tags.check_stabilization --tilt   # turn it and let go, then tilt it and let go, when told
-   ```
-
-   It reports *body-fixed*, *follows ... but creeps* (with how far and how slowly), *heading-locked* or
-   *horizon-locked*. If the horizon is locked, leave `[mount]` pitch and roll at 0.
-
-2. **How late are frames?** Run the check below, open the page it serves in a browser full screen, and point the
-   X4 at the screen. On a Pi without a screen, add `--host 0.0.0.0` and open `http://<the Pi>:8765` on a laptop:
-   the page times the tag by its own clock, synced to the Pi's. The page slides a tag (ID 40; `--id` for another,
-   not one on your walls) back and forth, and the check finds the delay that lines up where the tag was with each
-   frame's time. That includes the screen's own delay, roughly 15-25 ms at 120 Hz and 20-40 ms at 60 Hz (a refresh
-   or two plus the panel), so subtract yours and put the rest in `[camera] latency_ms`. One X4 measured about 100 ms
-   in the 360-degree mode and 75 ms in the 1080 mode (`--mode dual1080 --y 0.85`: that mode sees only near the
-   horizon), the defaults. Click the page to go full screen (the tag starts moving then).
-   Close any browser or system pop-ups first, because one covering the tag hides it.
-
-   ```sh
-   .venv/bin/python -m x4tags.check_latency          # then open http://localhost:8765
-   .venv/bin/python -m x4tags.check_latency --host 0.0.0.0   # page on another computer
-   ```
+The page times the tag by its own clock, synced to the Pi's, so the network between them doesn't matter. For the
+1080 mode add `--mode dual1080`. Close pop-ups first: one covering the tag hides it.
 
 ## Settings
 
-Everything lives in `/etc/x4tags.toml`, and `config.example.toml` lists every key. These are the ones to set:
+Everything lives in `/etc/x4tags.toml`; [config.example.toml](config.example.toml) lists every key with its default.
+A setting that can't work stops the service with one line in the log saying which.
 
-- `[mount]` is where the camera sits on the robot and how it's turned, in WPILib conventions. Measure its position
-  to the middle of the camera body, halfway between the two lenses. Positive pitch tips the view down and positive
-  yaw turns it left. At zero, the middle of the picture looks along the robot's +x.
-- `[tags] size_m` is the side of the black square (0.1651 for FRC). Without it you get bearings only.
-- `[field] layout` is a WPILib AprilTag field layout JSON, such as the season's file from WPILib, and turns on
-  `field_pose`. Keep `min_tags` at 2 or more, because a single tag's pose has two nearly equally good fits, metres
-  apart.
-- `[field] corner_noise_px` is the corner error the covariances assume, 0.5 by default. See
-  [Pose uncertainty](#pose-uncertainty).
-- `[output] nt_server` is your team number, a host, or `localhost:5810` for a simulator.
-- `[camera] mode` is `"equirect"` (360 degrees, the default) or `"dual1080"` (see [Hardware](#hardware)). Turning
-  the camera 45 degrees on the robot puts the 1080 mode's blind gaps on the diagonals.
-- `[camera] latency_ms` comes from `check_latency`, run with `--mode dual1080` for that mode. The defaults are one
-  X4's. Timestamps are moved back by this much, and at 4 m/s every 100 ms not accounted for is 0.4 m of error.
-- `[detector] min_tag_px` is 16 by default, below NAPA's own 22: field tags across the room are often 16-22 px in
-  the 360-degree picture. On a Pi 5, 16 adds about 1.2 ms per frame. `near_scale = 0` turns off the close-tag
-  views, which run beside the full-frame search and use about 3 ms of a second core per frame on a Pi 5.
-- `[detector] camera_gamma` is 2.0: the X4's picture isn't linear in light, and undoing its gamma before fitting
-  tag edges cut corner error by about a third on rendered frames and 10% against a screen's exact geometry, at no
-  cost. NAPA's `estimate_camera_gamma` read 1.7-2.4 from X4 clips. `"none"` treats the picture as linear.
+| Key | What to set |
+|---|---|
+| `[mount]` | where the camera sits on the robot (x, y, z to the middle of the camera body) and how it's turned (roll, pitch, yaw), in WPILib's robot frame. Positive pitch tips the view down, positive yaw turns it left; at zero the middle of the picture looks along the robot's +x |
+| `[tags] size_m` | the black square's side: 0.1651 for FRC |
+| `[field] layout` | the season's WPILib AprilTag layout JSON (below); turns on `field_pose` |
+| `[output] nt_server` | your team number, a host, or `localhost:5810` for a simulator |
+| `[camera] mode` | `"equirect"` (360 mode) or `"dual1080"` (1080 mode) |
+| `[camera] latency_ms` | from `check_latency`; default 100 (360 mode) or 75 (1080 mode). At 4 m/s, 10 ms unaccounted for is 4 cm |
 
-## What the robot sees
+The rest rarely need changing: `[detector] min_tag_px` (16; NAPA's own default of 22 misses far tags),
+`[detector] camera_gamma` (2.0: the X4's picture isn't linear in light), `[field] min_tags` (keep it at 2 or more:
+one tag's pose has two nearly equal fits, metres apart) and `[field] corner_noise_px` (below).
 
-NetworkTables 4, under the table `/x4tags` (rename it with `nt_table`). Positions are from the middle of the camera
-body; a tag's yaw and pitch are its direction from the lens that sees it, which for a tag 1 m away to the side can
-differ from the direction from the body's middle by up to 0.8 degrees.
+**The field layout** is WPILib's JSON. Get the season's from WPILib (allwpilib's `apriltag` resources), or write
+it from robot code with `AprilTagFieldLayout.loadField(...).serialize(path)`, and point `[field] layout` at it, for
+example `/etc/x4tags-field.json`. Check which tag positions your event uses (some seasons have more than one).
+
+## Robot code
+
+NetworkTables 4, under `/x4tags` (rename it with `[output] nt_table`). Every value of a frame carries the time the
+frame was taken (estimated: its arrival less `latency_ms`) as its NetworkTables timestamp.
 
 | Topic | Type | |
 |---|---|---|
+| `field_pose` | double[] | with a field layout: 28 values (below), empty when there's no fit |
 | `tags` | double[] | 7 values per tag: id, yaw_deg, pitch_deg, distance_m, x_m, y_m, z_m |
-| `field_pose` | double[] | with a field layout, 28 values (below); empty when there's no fit |
-| `frame`, `age_ms`, `decode_ms`, `detect_ms` | int, double | per frame |
 | `camera_connected` | boolean | true while frames arrive; `tags` and `field_pose` are emptied when it goes false |
+| `status` | string | `ok`, or what's wrong (`no camera: ...`, `camera stalled: ...`, ...) |
+| `frame`, `age_ms`, `decode_ms`, `detect_ms` | int, double | per frame: `age_ms` is from when the frame was taken to when it was sent (so it includes `latency_ms`); `detect_ms` includes the field pose |
+| `version` | string | the x4tags version |
 
-Yaw (left of the robot's forward) and pitch (above horizontal) give the direction of each tag's centre from the
-camera, in robot axes. `x_m, y_m, z_m` is the tag's centre in the robot frame. Distance and position are NaN without
-`tags.size_m`, or when the tag's pose fits poorly. Bearings go through the picture's heading, so they lag a few
-degrees after quick turns too. A frame's tags all share one array, so they can't get mixed up with another frame's,
-and every value carries the time its frame was taken. In Java:
-
-```java
-DoubleArraySubscriber sub = NetworkTableInstance.getDefault().getTable("x4tags")
-    .getDoubleArrayTopic("tags").subscribe(new double[0]);
-
-TimestampedDoubleArray latest = sub.getAtomic();
-double takenSeconds = latest.serverTime / 1e6;            // when the frame was taken (FPGA time base)
-for (int i = 0; i + 7 <= latest.value.length; i += 7) {
-    int id = (int) latest.value[i];
-    double yawDeg = latest.value[i + 1], distanceM = latest.value[i + 3];
-    // ... ignore it if Timer.getFPGATimestamp() - takenSeconds is too old
-}
-```
-
-`field_pose` reads the same way. `x4tags.publish.FIELD_POSE_FIELDS` names its 28 values in order:
+`field_pose` (`x4tags.publish.FIELD_POSE_FIELDS` names them):
 
 | Index | Value |
 |---|---|
 | 0-2 | robot x, y, z (m) |
 | 3-5 | robot roll, pitch, yaw (deg) |
-| 6-8 | camera x, y, z (m) |
-| 9 | rms_px, how closely the corners fit |
-| 10 | the number of tags used |
-| 11 | xy_std_m, the camera position's standard deviation in its least certain direction |
+| 6-8 | camera x, y, z (m): the middle of the camera body |
+| 9 | how closely the corners fit (px) |
+| 10 | tags used |
+| 11 | xy_std_m: the camera position's standard deviation in its least certain direction |
 | 12 | yaw_std_deg |
-| 13-21 | the robot (x, y, yaw) covariance, 3x3 row by row, field axes, in m and rad |
-| 22-25 | the camera (x, y) covariance, 2x2 row by row, field axes, in m |
+| 13-21 | the robot (x, y, yaw) covariance, 3x3 row by row, field axes, m and rad |
+| 22-25 | the camera (x, y) covariance, 2x2 row by row, field axes, m |
 | 26-27 | the camera position's standard deviations along the robot's forward and left axes (m) |
 
-The X4's picture lags its body by a few degrees after quick turns (see
-[Before relying on it](#before-relying-on-it)), so don't use its yaw as a heading measurement. Take the camera's x
-and y (values 6 and 7) and work out the robot's position from them with the gyro's heading at `takenSeconds`:
+Because of the heading lag, use the camera's x and y (values 6-7) with the gyro's heading, not the robot pose
+(values 0-5, 13-21), unless `check_stabilization` finds the picture body-fixed. A complete example for WPILib's pose
+estimators, assuming the robot drives level:
 
 ```java
-TimestampedDoubleArray pose = poseSub.getAtomic();          // poseSub: the field_pose topic, subscribed like tags
-double[] v = pose.value;
-double takenSeconds = pose.serverTime / 1e6;
-if (v.length >= 28) {
-    Rotation2d heading = poseEstimator.sampleAt(takenSeconds)   // the estimator's heading when the frame was taken
-        .map(Pose2d::getRotation).orElse(poseEstimator.getEstimatedPosition().getRotation());
-    Translation2d mount = new Translation2d(MOUNT_X_M, MOUNT_Y_M);   // the [mount] x_m, y_m
-    Translation2d robot = new Translation2d(v[6], v[7]).minus(mount.rotateBy(heading));
-    double floorM = 0.03;                                       // for what the covariance leaves out (below)
-    poseEstimator.addVisionMeasurement(new Pose2d(robot, heading), takenSeconds,
-        VecBuilder.fill(Math.max(v[26], floorM), Math.max(v[27], floorM), Double.POSITIVE_INFINITY));
+import edu.wpi.first.math.VecBuilder;
+import edu.wpi.first.math.estimator.SwerveDrivePoseEstimator;
+import edu.wpi.first.math.geometry.Pose2d;
+import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.geometry.Translation2d;
+import edu.wpi.first.networktables.DoubleArraySubscriber;
+import edu.wpi.first.networktables.NetworkTableInstance;
+import edu.wpi.first.networktables.PubSubOption;
+import edu.wpi.first.networktables.TimestampedDoubleArray;
+import edu.wpi.first.wpilibj.Timer;
+
+public class X4Vision {
+    // [mount] x_m, y_m: where the middle of the camera body is on the robot
+    private static final Translation2d MOUNT = new Translation2d(0.10, 0.0);
+    private static final double FLOOR_M = 0.03;   // for errors the covariance leaves out; tune it on the field
+    private static final double MAX_AGE_S = 0.5;
+
+    private final DoubleArraySubscriber poseSub = NetworkTableInstance.getDefault().getTable("x4tags")
+        .getDoubleArrayTopic("field_pose").subscribe(new double[0], PubSubOption.pollStorage(10));
+
+    /** Call every robot loop: adds each new camera pose once. */
+    public void update(SwerveDrivePoseEstimator estimator) {
+        for (TimestampedDoubleArray pose : poseSub.readQueue()) {
+            double[] v = pose.value;
+            double taken = pose.serverTime / 1e6;              // when the frame was taken (FPGA time)
+            if (v.length < 28 || Timer.getFPGATimestamp() - taken > MAX_AGE_S
+                    || !Double.isFinite(v[26]) || !Double.isFinite(v[27])) {
+                continue;
+            }
+            Rotation2d heading = estimator.sampleAt(taken)       // the heading when the frame was taken
+                .map(Pose2d::getRotation).orElse(estimator.getEstimatedPosition().getRotation());
+            Translation2d robot = new Translation2d(v[6], v[7]).minus(MOUNT.rotateBy(heading));
+            estimator.addVisionMeasurement(new Pose2d(robot, heading), taken,
+                VecBuilder.fill(Math.max(v[26], FLOOR_M), Math.max(v[27], FLOOR_M), Double.POSITIVE_INFINITY));
+        }
+    }
 }
 ```
 
-Values 26-27 are along the robot's forward and left axes because WPILib's estimators apply vision standard deviations
-along the robot's axes, not the field's. x4tags turns them into robot axes with the picture's heading, and a few
-degrees of lag there changes them very little. WPILib takes one standard deviation per axis, so it can't use the
-correlation between x and y. For a weak two-tag pose that leaves the per-axis figures up to 1.4 times too small along
-the ellipse's long axis. Pass `xy_std_m` (value 11) for both axes if you'd rather err on the cautious side.
+`readQueue` hands over each new pose once; reading the latest value every loop would add the same pose several
+times. Infinite heading uncertainty leaves the heading to the gyro. With CTRE's generated swerve drivetrain, its
+`addVisionMeasurement` and `samplePoseAt` take FPGA time like WPILib's (it converts them); check yours.
 
-The robot x, y, z (values 0-2), its heading and the robot covariance (values 13-21) all go through the picture's
-heading, so use them only if `check_stabilization` finds the picture body-fixed. With the camera 0.3 m from the
-robot's centre, a 5-degree lag moves the robot position by 2.6 cm.
+`tags` reads the same way, 7 values per tag. Yaw (left of the robot's forward) and pitch (above horizontal) are the
+direction of the tag's centre from the lens that sees it, in robot axes; for a tag 1 m away to the side that can
+differ from the direction from the body's middle by up to 0.8 degrees. Distance and position are NaN without
+`[tags] size_m` or when the tag's pose fits poorly.
+
+**UDP and stdout** (`[output] udp`, `print`) carry one JSON object per frame instead: `seq`, `age_ms`, `decode_ms`,
+`detect_ms`, `size`, `tags` (each with `id`, `yaw_deg`, `pitch_deg`, `corners_px`, `refined`, `seam`, `near`,
+`hamming`, `margin`, and with a pose `distance_m`, `position_m`, `rotation`, `pose_error_px`) and `field_pose`
+(`robot_xyz_m`, `robot_rpy_deg`, `camera_xyz_m`, `rms_px`, `tags` (IDs), `xy_std_m`, `yaw_std_deg` and, when it has
+them, `robot_covariance`, `camera_xy_covariance`, `gyro_std_devs_m`). There's no shared clock: take the receive time
+less `age_ms` as when the frame was taken.
 
 ### Pose uncertainty
 
 The covariances come from the fit's geometry and an assumed random error in each corner, `[field] corner_noise_px`
-(0.5 px by default). They say how well the visible tags pin the pose down. Two small, distant tags in nearly the
-same direction can fit well and still be weak, and the covariance says so: in an earlier test, such pairs came with an
-`xy_std_m` of 8-20 cm. In 40 other poses of the rendered room, with 4-12 tags found and the default 0.5 px:
+(0.5 px). Two small, distant tags in nearly the same direction can fit well and still be weak, and the covariance
+says so. In a rendered room, the camera position's `xy_std_m` was about 0.7 mm from every tag in view, 1.6 mm from
+the three largest and 9 mm from the two largest. Correlations are capped (with NAPA's `cap_correlations`) so that
+two-tag poses aren't overconfident.
 
-| Tags used | xy_std_m, median / 90th percentile |
+The covariances cover random corner error only, not tags that are off from the layout, timing or the heading lag,
+and those don't shrink with more tags. Put a floor under the standard deviations on the robot, a few centimetres to
+start, and tune it on the field. WPILib takes one standard deviation per axis, so it can't use the x-y correlation:
+for a weak two-tag pose that leaves the per-axis figures up to 1.4 times too small along the ellipse's long axis.
+Pass `xy_std_m` (value 11) for both axes to err on the cautious side.
+
+## Troubleshooting
+
+| You see | Do |
 |---|---|
-| every tag found | 0.7 / 0.8 mm |
-| the three largest | 1.6 / 3.0 mm |
-| the two largest | 9 / 24 mm |
+| `no Insta360 X4 on USB` | check the cable and power; plug it straight into the Pi |
+| `the X4 is on USB but isn't a webcam` | choose Webcam on the camera's USB menu |
+| `camera sends 1920x1080, not ...` | set `[camera] mode` to match the camera, or switch the camera's output |
+| `settings /etc/x4tags.toml: ...` | fix the key it names; the service retries on its own and starts once it's right |
+| `could not open /dev/video0` | something else has the camera: `sudo systemctl stop x4tags` before a check or a manual run |
+| no `field_pose` | is `[field] layout` set, and are 2 or more of its tags in view? Tags must fit within `[field] max_rms_px` and the pose within `max_xy_std_m` |
+| `frame clock off (arrival times)` | normal for 2-3 s after starting, and always in the 1080 mode |
+| `the clock jumped`, `NetworkTables: disconnected` | NetworkTables restarts or reconnects on its own; for a steady clock, turn off NTP on the coprocessor |
+| `status` stuck on `camera stalled` | unplug and replug the X4 |
 
-From two tags, a linearized covariance is too sure of some combinations of x, y and heading. x4tags caps its
-correlations with NAPA's `cap_correlations`. In a Monte Carlo of the test room with Gaussian corner noise of the assumed
-size, 3.5-5.5% of robot (x, y, yaw) errors then fell outside the 95% ellipse, with two tags or with all of them.
-Without the cap, two tags left 11-28% outside. A test fails if the cap goes.
+To look at a problem away from the robot, record the camera and replay it:
 
-The covariances cover random corner error only. They leave out how far the real tags are from the layout, the
-camera's stitch, timing errors and the picture's heading lag. Those don't shrink as more tags come into view, so a
-robot won't see the millimetre figures above. Put a floor under the standard deviations on the robot, a few
-centimetres to start with, and tune it on the field. The real X4's corners move far less than 0.5 px from frame to
-frame: over 20 frames of a screen at half a metre, a corner's largest move from its average was 0.09 px median. The
-0.5 px default is there to stand in for slower errors too.
+```sh
+v4l2-ctl -d /dev/video0 --set-fmt-video=width=2880,height=1440,pixelformat=MJPG \
+    --stream-mmap --stream-count=300 --stream-to=rec.mjpg            # 10 s
+.venv/bin/x4tags --config /etc/x4tags.toml --replay rec.mjpg --print
+```
 
-UDP and stdout carry one JSON object per frame with all of this. Their `field_pose` has `robot_covariance`,
-`camera_xy_covariance` and `gyro_std_devs_m` (values 26-27). For each tag they add its corners (pixels in the
-stitched frame), its hamming distance, its decision margin and its full pose rotation. The rotation's columns are
-the tag's axes towards its printed left edge, towards its printed bottom and out of its face, in robot axes.
+## Updating and uninstalling
 
-## Layout
+```sh
+git pull && deploy/install.sh      # reinstalls and restarts the service; keeps /etc/x4tags.toml
+deploy/install.sh --uninstall      # stops and removes the service (keeps the settings and .venv)
+```
 
-| Path | |
-|---|---|
-| `src/x4tags/capture.py` | `X4Webcam`: finds the X4 and captures the newest frame in grey, decoding in its own thread |
-| `src/x4tags/equirect.py` | pixels to directions and back, flat views of the sphere, how much a tag is bent |
-| `src/x4tags/dual.py` | the same for the 1920x1080 mode, from its calibration |
-| `src/x4tags/detector.py` | `X4TagDetector`: NAPA, plus the seam, close-tag views, bent-tag refinement and single-tag poses |
-| `src/x4tags/field.py`, `localize.py` | WPILib field layouts, and the field pose from all tags |
-| `src/x4tags/mount.py`, `results.py` | camera to robot frame, and each frame's results |
-| `src/x4tags/publish.py` | NetworkTables, UDP and stdout |
-| `src/x4tags/app.py`, `config.py` | the service loop and its settings |
-| `src/x4tags/check_latency.py`, `check_stabilization.py` | the camera checks |
-| `deploy/` | the install script and systemd unit |
-| `tests/` | rendered 360-degree frames and rooms of tags with exact truth; `pip install -e ".[test,nt]" && pytest` |
+After an update, compare `/etc/x4tags.toml` with `config.example.toml`: a key that's gone stops the service with a
+message naming it.
 
-## Using the pieces directly
+## Limits
+
+- Range: 4.7 m for a 16 px tag in the 360 mode; distant tags need a narrower camera.
+- Latency about 100 ms before the Pi starts; exposure up to about 23 ms in dim light.
+- The heading lags after turns: take heading from the gyro.
+- A tag right on the stitch is seen partly by each lens: its own pose can be off by about 1 cm (the field pose takes
+  each corner from its own lens and trusts corners there less).
+- A face-on tag's own pose has two near-equal rotations; the reported one can be tilted a few degrees the wrong way.
+- The 1080 mode's frame times jitter by about 13 ms, and its calibration and the two-lens model come from one X4.
+- Values sent before NetworkTables has synced its clock with the robot may carry the Pi's own time base.
+
+## Development
+
+```sh
+python -m venv .venv && .venv/bin/pip install -e ".[nt,test,lint]"
+.venv/bin/pytest && .venv/bin/ruff check src tests
+```
+
+The tests render 360-degree frames and rooms of tags with exact truth, and fit one real X4 frame
+(`tests/fixtures`). The pieces work on their own too:
 
 ```python
-from x4tags import X4Webcam, X4TagDetector
+from x4tags import X4TagDetector, X4Webcam
 from x4tags.field import FieldLayout
 from x4tags.localize import FieldLocalizer
 
-det = X4TagDetector(min_tag_px=16)                # other NapaDetector options pass through
-loc = FieldLocalizer(FieldLayout.load("field.json"), tag_size_m=0.1651)
-with X4Webcam() as cam:
-    t, gray = cam.read()                          # newest frame, grey
+# X4TagDetector defaults to min_tag_px=16 and camera_gamma=2.0; other NapaDetector options pass through
+with X4Webcam() as cam, X4TagDetector() as det:
+    loc = FieldLocalizer(FieldLayout.load("field.json"), tag_size_m=0.1651)
+    t, gray = cam.read()                         # (when it was taken, as well as the clock knows; grey frame)
     tags = det.detect(gray)
     for tag in tags:
-        print(tag.tag_id, tag.bearing_deg(), tag.refined, tag.seam, tag.near)
-        pose = det.pose(tag, 0.1651)              # (R, t, error px) in the camera frame, or None
-    field_pose = loc.solve(tags)                  # FieldPose or None
+        print(tag.tag_id, tag.bearing_deg(), det.pose(tag, 0.1651))  # pose: (R, t, error px) or None
+    pose = loc.solve(tags, gray.shape[0], det.px_per_rad(gray.shape[1], gray.shape[0]))  # FieldPose or None
 ```
 
-The camera frame has x to the right, y down and z forward, towards the middle of the picture. Corners come in NAPA's
-order: the printed bottom-right first, then bottom-left, top-left and top-right. In WPILib's tag frame (x out of the
-face, y to a viewer's right, z up) those are (0, s/2, -s/2), (0, -s/2, -s/2), (0, -s/2, s/2) and (0, s/2, s/2). A
-tag across the seam keeps its quad whole, so a corner's column can be below 0 or past the width.
-
-## Not done yet
-
-- Stabilization hasn't been checked on a Pi with a live X4 (capture, timing, accuracy and latency have).
-- Values sent before NetworkTables has synced its clock with the robot may carry the Pi's own time base. Check the
-  timestamps on a real robot.
-- Range is short (see [Measured](#measured)). Distant tags need a narrower camera.
-- The X4 stitches its two lenses, 28 mm apart, in the camera. A close tag right on a stitch line is seen partly by
-  each, so its single-tag pose can be off by about 1 cm (the field pose takes each corner from its own lens and
-  trusts corners there less). The rendered tests show each tag through one lens only.
-- Single-tag poses don't report the IPPE ambiguity, so a face-on tag's rotation can be a few degrees off.
-- The 1080 mode's calibration comes from one X4.
+| Path | |
+|---|---|
+| `src/x4tags/capture.py` | `X4Webcam`: finds the X4, captures the newest frame in grey, and the frame clock |
+| `src/x4tags/equirect.py`, `dual.py` | pixels to directions and back, for the 360 mode and the calibrated 1080 mode |
+| `src/x4tags/detector.py` | `X4TagDetector`: NAPA plus the seam, close-tag views, bent-tag refinement, single-tag poses and the two lens centres |
+| `src/x4tags/field.py`, `localize.py` | WPILib field layouts, and the field pose from all tags |
+| `src/x4tags/mount.py`, `results.py` | camera to robot frame, and each frame's results |
+| `src/x4tags/publish.py`, `app.py`, `config.py` | outputs, the service loop and its settings |
+| `src/x4tags/check_latency.py`, `check_stabilization.py` | the camera checks |
+| `deploy/` | the installer and systemd unit |
 
 ## License
 
