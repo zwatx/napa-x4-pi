@@ -150,3 +150,38 @@ def test_replay_with_a_field_layout_reports_the_robot_pose(tmp_path, mode):
         assert fp["robot_xyz_m"][:2] == pytest.approx([x, y], abs=0.02)
         assert fp["robot_rpy_deg"][2] == pytest.approx(yaw, abs=0.3)
         assert len(fp["tags"]) >= 4
+
+
+def test_networktables_keeps_publishing_after_the_clock_jumps(monkeypatch):
+    """A clock stepping back (NTP at boot) restarts NetworkTables; the robot must still get every frame after it."""
+    ntcore = pytest.importorskip("ntcore")
+    server = ntcore.NetworkTableInstance.create()
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    server.startServer("", "127.0.0.1", 0, port)
+    pub = publish.NetworkTablesPublisher(f"localhost:{port}")
+    try:
+        frames = server.getTable("x4tags").getIntegerTopic("frame").subscribe(-1, ntcore.PubSubOptions(pollStorage=100))
+        status = server.getTable("x4tags").getStringTopic("status").subscribe("")
+
+        def send(seq):
+            pub.publish(FrameResult(seq, time.monotonic(), 2880, 1440, 9.0, 3.0, []))
+            time.sleep(0.05)
+
+        deadline = time.monotonic() + 5
+        while not server.getConnections() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        pub.status("ok")
+        for seq in range(5):
+            send(seq)
+        real = pub._now
+        monkeypatch.setattr(pub, "_now", lambda: real() - 10_000_000)  # the wall clock steps back 10 s
+        for seq in range(5, 40):
+            send(seq)
+        got = {v.value for v in frames.readQueue()}
+        assert set(range(30, 40)) <= got  # still arriving well after the restart
+        assert status.get() == "ok"  # state carried over to the restarted connection
+    finally:
+        pub.close()
+        ntcore.NetworkTableInstance.destroy(server)

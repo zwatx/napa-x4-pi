@@ -164,7 +164,7 @@ def _check_values(b: dict) -> None:
     cam, det, tags, fld, out = b["camera"], b["detector"], b["tags"], b["field"], b["output"]
     checks = [
         (cam.fps >= 0, "[camera] fps", "0 or more (0 replays files as fast as they decode)"),
-        (cam.reconnect_s >= 0, "[camera] reconnect_s", "0 or more"),
+        (cam.reconnect_s >= 0.1, "[camera] reconnect_s", "0.1 or more (seconds)"),
         (cam.latency_ms is None or cam.latency_ms >= 0, "[camera] latency_ms", "0 or more"),
         (det.min_tag_px >= 4, "[detector] min_tag_px", "4 or more"),
         (det.threads >= 1, "[detector] threads", "1 or more"),
@@ -182,7 +182,7 @@ def _check_values(b: dict) -> None:
         (fld.corner_noise_px > 0, "[field] corner_noise_px", "more than 0"),
         (fld.max_xy_std_m > 0, "[field] max_xy_std_m", "more than 0"),
         (out.stats_every_s >= 0, "[output] stats_every_s", "0 or more"),
-        (out.udp is None or _host_port(out.udp), "[output] udp", '"host:port", like "10.12.34.5:5800"'),
+        (out.udp is None or _host_port(out.udp), "[output] udp", '"host:port" (IPv4), like "10.12.34.5:5800"'),
     ]
     for ok, what, expected in checks:
         if not ok:
@@ -195,4 +195,5 @@ def _check_values(b: dict) -> None:
 
 def _host_port(text: str) -> bool:
     host, sep, port = text.rpartition(":")
-    return bool(sep and host and port.isdigit() and 0 < int(port) < 65536)
+    ipv4_or_name = host and not any(c in host for c in ":[]")
+    return bool(sep and ipv4_or_name and port.isdigit() and 0 < int(port) < 65536)

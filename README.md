@@ -32,7 +32,8 @@ How it works: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 
 ## What you need
 
-- A **Raspberry Pi 5** with 64-bit Raspberry Pi OS or Debian 12 or later. (A Pi 4 is untested.)
+- A **Raspberry Pi 5** with 64-bit Raspberry Pi OS: Debian 13 (trixie) is tested. Debian 12 works, but its systemd
+  restarts a failing service every 2 s instead of backing off. (A Pi 4 is untested.)
 - An **Insta360 X4** in webcam mode, plugged straight into the Pi with a USB-C cable (not through a hub or dock:
   some power the camera but pass no data).
 - **Power for both.** A Pi 5 gives its USB ports only 600 mA in all unless its supply negotiates 5 A, and the X4

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install x4tags on a Raspberry Pi 5 (64-bit Raspberry Pi OS / Debian 12 or newer), from this checkout:
+# Install x4tags on a Raspberry Pi 5 (64-bit Raspberry Pi OS, Debian 13 tested; 12 works), from this checkout:
 #   - a virtual environment in .venv with x4tags, NAPA and pyntcore (prebuilt wheels: no compiler needed)
 #   - /etc/x4tags.toml (from config.example.toml, never overwritten)
 #   - the x4tags systemd service, (re)started now and at every boot
@@ -15,6 +15,11 @@ fi
 cd "$(dirname "$0")/.."
 REPO="$(pwd)"
 RUN_AS="$(id -un)"
+
+case "${1:-}" in
+    ""|--no-service|--uninstall) ;;
+    *) echo "unknown option ${1}: use --no-service or --uninstall (or nothing)" >&2; exit 2 ;;
+esac
 
 if [[ "${1:-}" == "--uninstall" ]]; then
     sudo systemctl disable --now x4tags 2>/dev/null || true
@@ -59,5 +64,9 @@ sed -e "s|@USER@|$RUN_AS|g" -e "s|@REPO@|$REPO|g" deploy/x4tags.service \
     | sudo tee /etc/systemd/system/x4tags.service >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable x4tags >/dev/null
-sudo systemctl restart x4tags  # so an update takes effect now, not at the next boot
+# Restart so an update takes effect now, not at the next boot.
+if ! sudo systemctl restart x4tags; then
+    echo "the service didn't start: journalctl -u x4tags says why (often a setting in /etc/x4tags.toml)" >&2
+    exit 1
+fi
 echo "service running: journalctl -u x4tags -f"

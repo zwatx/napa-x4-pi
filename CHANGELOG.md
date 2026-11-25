@@ -29,7 +29,7 @@ First release tested with a live X4 on a Raspberry Pi 5, against tags at known p
 - Settings and files that can't work (bad values, a missing layout or replay) end with one line and exit code 78.
 - systemd: `Type=notify` with a 15 s watchdog, restart back-off, hardening, and journald log priorities.
 - NetworkTables: `status` and `version` topics, connection messages in the log, and a restart when the system
-  clock steps back (NT would otherwise drop values until it caught up).
+  clock jumps (NT would otherwise drop values stamped before a backward jump until it caught up).
 - With more than 8 tags in view, one tag that doesn't fit no longer stops the field pose.
 - Clearer messages when the X4 is missing or in USB-drive mode; the stats line says whether the frame clock is on.
 - The installer restarts the service after an update, rebuilds a mismatched `.venv`, needs no compiler, and can

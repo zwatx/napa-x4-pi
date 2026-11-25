@@ -168,7 +168,11 @@ def main(argv=None) -> int:
                                           f"quickly, let go, and don't touch it until told"))
     ok = True
     with X4Webcam(a.device, reduce=4) as cam:
-        _, gray = cam.read(timeout=5.0)
+        try:
+            _, gray = cam.read(timeout=5.0)
+        except TimeoutError as e:
+            print(f"no frames from the camera: {e}", flush=True)
+            return 1
         if gray.shape[1] != 2 * gray.shape[0]:
             print(f"the camera sends a {gray.shape[1] * 4}x{gray.shape[0] * 4} picture: this check needs the X4's "
                   f"360-degree (2880x1440) webcam output", flush=True)

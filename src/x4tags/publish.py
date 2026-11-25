@@ -6,6 +6,7 @@ import json
 import logging
 import socket
 import sys
+import threading
 import time
 
 import numpy as np
@@ -69,35 +70,37 @@ class StdoutPublisher(Publisher):
 
 
 class UdpPublisher(Publisher):
-    """One JSON datagram per frame to "host:port". The name is looked up when first needed and again every
-    ``resolve_every_s`` (a lookup per frame, of an mDNS .local name especially, could stall the loop), so a robot or
-    laptop that comes up late, or changes address, is found."""
+    """One JSON datagram per frame to "host:port" (IPv4). The name is looked up on a thread of its own, now and every
+    ``resolve_every_s``, so a robot or laptop that comes up late, or changes address, is found, and a slow lookup
+    (a DNS server that doesn't answer can take 10 s or more) never holds up a frame."""
 
     def __init__(self, target: str, resolve_every_s: float = 10.0):
         host, sep, port = target.rpartition(":")
         if not sep or not host or not port.isdigit():
             raise ValueError(f"udp = {target!r}: expected \"host:port\"")
         self.host, self.port, self.resolve_every_s = host, int(port), resolve_every_s
-        self.addr, self._resolved_at, self._failing = None, -1e9, False
+        self.addr, self._failing = None, False
+        self._stop = threading.Event()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._thread = threading.Thread(target=self._resolve_forever, name="udp-resolve", daemon=True)
+        self._thread.start()
 
-    def _resolve(self):
-        now = time.monotonic()
-        if now - self._resolved_at < self.resolve_every_s:
-            return
-        self._resolved_at = now
-        try:
-            self.addr = socket.getaddrinfo(self.host, self.port, socket.AF_INET, socket.SOCK_DGRAM)[0][4]
-            if self._failing:
-                log.info("udp: %s:%d is %s again", self.host, self.port, self.addr[0])
-            self._failing = False
-        except OSError as e:
-            if not self._failing:
-                log.warning("udp: can't find %s (%s); trying again every %.0f s", self.host, e, self.resolve_every_s)
-            self._failing = True
+    def _resolve_forever(self):
+        while True:
+            try:
+                self.addr = socket.getaddrinfo(self.host, self.port, socket.AF_INET, socket.SOCK_DGRAM)[0][4]
+                if self._failing:
+                    log.info("udp: %s:%d is %s again", self.host, self.port, self.addr[0])
+                self._failing = False
+            except OSError as e:
+                if not self._failing:
+                    log.warning("udp: can't find %s (%s); trying again every %.0f s", self.host, e,
+                                self.resolve_every_s)
+                self._failing = True
+            if self._stop.wait(self.resolve_every_s):
+                return
 
     def publish(self, frame):
-        self._resolve()
         if self.addr is None:
             return
         data = json.dumps(frame.to_dict(time.monotonic())).encode()
@@ -107,6 +110,7 @@ class UdpPublisher(Publisher):
             log.debug("udp send failed: %s", e)
 
     def close(self):
+        self._stop.set()
         self.sock.close()
 
 
@@ -184,6 +188,7 @@ class NetworkTablesPublisher(Publisher):
         if abs(offset - self._offset) > 0.5:
             log.warning("the clock jumped %+.1f s: restarting NetworkTables so values aren't dropped",
                         offset - self._offset)
+            self._offset = offset  # once per jump, even if the restart fails
             self._stop()
             self._start()
 
@@ -223,6 +228,11 @@ class NetworkTablesPublisher(Publisher):
         self.inst.flush()
 
     def _stop(self):
+        # Close every publisher first: one left for the garbage collector unpublishes the restarted instance's
+        # publishers of the same topics (ntcore reuses the handles), and the robot would see nothing again.
+        for pub in (self.tags, self.field_pose, self.frame, *self.timings.values(), self.connected, self.status_pub,
+                    self.version_pub):
+            pub.close()
         self.inst.stopClient()
         type(self.inst).destroy(self.inst)
 

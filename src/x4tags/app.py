@@ -378,7 +378,7 @@ def main(argv=None) -> int:
     ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     a = ap.parse_args(argv)
     handler = logging.StreamHandler()
-    if os.environ.get("JOURNAL_STREAM"):
+    if _stderr_is_journal():
         handler.setFormatter(_JournalFormatter("%(levelname)s %(message)s"))
     else:
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
@@ -398,13 +398,22 @@ def main(argv=None) -> int:
              or "none")
     if not (out.nt_server or out.udp or out.print):
         log.warning("no outputs set ([output] nt_server, udp or print): results go nowhere")
-    if out.print and os.environ.get("JOURNAL_STREAM"):
+    if out.print and _stderr_is_journal():
         log.warning("[output] print under systemd writes a JSON line per frame into the journal")
     try:
         return run(cfg, a.replay, a.seconds, a.loop)
     except StartupError as e:
         log.error("%s", e)
         return 78
+
+
+def _stderr_is_journal() -> bool:
+    """Whether stderr goes straight to journald (systemd sets JOURNAL_STREAM to its device:inode)."""
+    try:
+        st = os.fstat(2)
+        return os.environ.get("JOURNAL_STREAM") == f"{st.st_dev}:{st.st_ino}"
+    except OSError:
+        return False
 
 
 def _version(dist: str) -> str:
