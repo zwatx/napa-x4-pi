@@ -212,29 +212,35 @@ def test_gyro_std_devs_turn_into_robot_axes():
 
 def test_a_tag_on_the_stitch_is_trusted_less_not_thrown_out():
     """The X4's stitch (90 degrees from straight ahead) shifts tags by a few px; one there still counts, at a lower
-    weight, where the same shift anywhere else gets it left out."""
+    weight, where the same shift anywhere else gets it left out, and every other tag stays in either way."""
     import dataclasses
 
-    layout, mount, p_r, tags = _scene((2.4, 1.7), 30.0)
-    tags = sorted(tags, key=lambda t: t.tag_id)[:5]
+    layout = FieldLayout.from_dict(room_layout())
+    mount = Mount(z_m=0.55)
+    r_fr, p_r = rotation_rpy(0, 0, math.radians(30)), np.array([2.4, 1.7, 0.0])
+    c = p_r + r_fr @ mount.translation
+    target = 3
 
-    def turned(t, deg):  # every corner turned about the camera's vertical axis
-        a = np.radians(deg)
-        r = np.array([[np.cos(a), 0, np.sin(a)], [0, 1, 0], [-np.sin(a), 0, np.cos(a)]])
-        return dataclasses.replace(t, rays=t.rays @ r.T)
+    def camera(turn_deg):  # the camera turned about its own vertical axis
+        a = math.radians(turn_deg)
+        return r_fr @ mount.rotation @ np.array([[math.cos(a), 0, math.sin(a)], [0, 1, 0], [-math.sin(a), 0, math.cos(a)]])
 
-    for on_stitch in (True, False):
-        az = np.degrees(np.arctan2(*tags[2].center_ray[[0, 2]]))
-        whole = 90.0 - az if on_stitch else 0.0  # turn the camera's view so tag 2 sits on the stitch (or not)
-        seen = [turned(t, whole) for t in tags]
-        if not on_stitch:
-            assert abs(abs(az) - 90) > 15  # (it isn't there to begin with)
-        seen[2] = turned(seen[2], 0.4)  # ~3 px off
-        loc = FieldLocalizer(layout, SIZE, Mount(z_m=0.55))
-        pose = loc.solve(seen)
+    def az(r_fc):
+        d = r_fc.T @ (layout[target].position - c)
+        return math.degrees(math.atan2(d[0], d[2]))
+
+    on = min(np.arange(-180, 180, 0.25), key=lambda t: abs(abs(az(camera(t))) - 90.0))  # target on the stitch
+    off = min(np.arange(-180, 180, 0.25), key=lambda t: abs(az(camera(t))))  # target straight ahead
+    for turn, on_stitch in ((on, True), (off, False)):
+        tags = _noisy_tags(layout, camera(turn), c, 0.0, np.random.default_rng(0))
+        assert target in {t.tag_id for t in tags} and len(tags) >= 4
+        a = math.radians(0.4)  # the target shifted ~3 px about the camera's vertical
+        turn_rays = np.array([[math.cos(a), 0, math.sin(a)], [0, 1, 0], [-math.sin(a), 0, math.cos(a)]])
+        tags = [dataclasses.replace(t, rays=t.rays @ turn_rays.T) if t.tag_id == target else t for t in tags]
+        pose = FieldLocalizer(layout, SIZE, mount).solve(tags)
         assert pose is not None
-        assert (tags[2].tag_id in pose.tag_ids) == on_stitch
-
+        assert (target in pose.tag_ids) == on_stitch
+        assert set(pose.tag_ids) >= {t.tag_id for t in tags} - {target}  # no other tag is left out
 
 def test_each_half_of_the_picture_is_seen_from_its_own_lens(monkeypatch):
     """Tags all around a camera 1 m from the nearest: with each half from its own lens centre (28 mm apart) the pose
@@ -253,3 +259,30 @@ def test_each_half_of_the_picture_is_seen_from_its_own_lens(monkeypatch):
     monkeypatch.setattr(detector, "LENS_OFFSET_M", 0.0)
     one_centre = FieldLocalizer(layout, SIZE, mount, max_rms_px=99).solve(tags)
     assert one_centre.rms_px > 1.0
+
+
+
+def test_a_real_frame_across_the_stitch_fits_two_lenses_14_mm_from_the_middle(monkeypatch):
+    """Tags at known places on a screen 0.6 m from a real X4, across its stitch: they fit with each half of the picture
+    seen from its own lens 14 mm from the body's middle, and not with one centre or with the halves swapped."""
+    import json
+    import pathlib
+
+    import x4tags.detector as detector
+    from x4tags.detector import X4Tag
+    from x4tags.equirect import pixel_to_ray
+
+    data = json.loads((pathlib.Path(__file__).parent / "fixtures" / "x4_screen_stitch.json").read_text())
+    layout = FieldLayout.from_dict(data["layout"])
+    tags = []
+    for t in data["tags"]:
+        c = np.array(t["corners"])
+        tags.append(X4Tag(t["id"], c, pixel_to_ray(c[:, 0], c[:, 1], data["width"], data["height"]), 0, 100.0, 0.0,
+                          True, False))
+    assert {bool(t.center_ray[2] > 0) for t in tags} == {True, False}  # tags in both halves
+    pose = FieldLocalizer(layout, data["tag_size_m"]).solve(tags)
+    assert pose is not None and len(pose.tag_ids) == len(tags) and pose.rms_px < 0.8
+    for offset in (0.0, -detector.LENS_OFFSET_M):
+        monkeypatch.setattr(detector, "LENS_OFFSET_M", offset)
+        wrong = FieldLocalizer(layout, data["tag_size_m"], max_rms_px=99).solve(tags)
+        assert wrong is None or wrong.rms_px > 3.0

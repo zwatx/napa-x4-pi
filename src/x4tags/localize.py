@@ -5,10 +5,11 @@ fits one camera pose to the directions of all tag corners (angles on the sphere,
 picture, where a pinhole camera model can't). It starts from each tag's own pose and keeps the best fit.
 
 Position comes out right even though the X4 rotates its picture (it stabilizes webcam output in the camera): the
-picture turns about the lens centre, which doesn't move it. The solved rotation is the picture's, which lags the
-body by a few degrees for several seconds after a quick turn (measured: 3-8 degrees, ~5 s time constant; see
-``check_stabilization``), so take heading from the robot's gyro and use ``camera_position`` with it (see
-``robot_position_from_heading``).
+picture turns about its lenses, which barely moves them (they are 28 mm apart, and each corner is taken from the
+lens that sees it: a few degrees of lag moved the camera position by about 1-2 mm in a simulation). The solved
+rotation is the picture's, which lags the body by a few degrees for several seconds after a quick turn (measured:
+3-8 degrees, ~5 s time constant; see ``check_stabilization``), so take heading from the robot's gyro and use
+``camera_position`` with it (see ``robot_position_from_heading``).
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from .mount import Mount, rotation_rpy
 
 @dataclass
 class FieldPose:
-    camera_position: np.ndarray  # field frame, metres
+    camera_position: np.ndarray  # field frame, metres: the middle of the camera body, between its lenses
     camera_rotation: np.ndarray  # camera axes (x right, y down, z forward) as columns in field axes
     robot_position: np.ndarray  # robot origin in the field, through the mount (assumes the picture is body-fixed)
     robot_rotation: np.ndarray  # robot axes as columns in field axes (same assumption)
@@ -129,7 +130,7 @@ class FieldLocalizer:
             return fit is not None and fit[5] and fit[3].max() <= limit
 
         pose = self._solve(tags)
-        if not good(pose) and self.min_tags < len(tags) <= 8:
+        if not good(pose) and len(tags) > self.min_tags:
             best = None
             if pose is not None:  # usually one tag is off, and the robust fit leaves it the worst: try without it
                 k = int(np.argmax(pose[3]))
@@ -139,7 +140,7 @@ class FieldLocalizer:
                     best = (fit, rest)
             # Otherwise leave each tag out in turn and keep the best fit in which every remaining tag fits. Each
             # try is a full solve, so this costs up to (tags + 2) solves a frame: ~35 ms for 5 tags on a Pi 5.
-            for k in range(len(tags)) if best is None else ():
+            for k in range(len(tags)) if best is None and len(tags) <= 8 else ():
                 rest = tags[:k] + tags[k + 1:]
                 fit = self._solve(rest)
                 if good(fit) and (best is None or fit[2] < best[0][2]):
