@@ -85,6 +85,13 @@ the 360-degree picture has no error there beyond the corners' own; its camera po
 Without the refinement of bent tags the fit was 0.37 px. Undoing a gamma of 2.0 (`[detector] camera_gamma`, below)
 brought it to 0.22 px. Spacings worked out from single tags' own poses came within -1.5 to +3.9 mm of the truth.
 
+**At the stitch.** With the X4 turned so the same eight tags sat 93-115 degrees to its side, by the line where it
+joins its two lenses' pictures (90 degrees from straight ahead), the tags more than 10 degrees from that line fitted
+as well as in front (0.13-0.24 px), but the two 3.5 degrees from it were shifted about 3 px and bent by about 1.7 px.
+The lenses see from slightly different places, so this varies with distance (1 m here). Those two tags made the field
+pose fail outright; now corners near the stitch count as up to 8 times less certain, fading to normal 10 degrees
+away, and the pose used all eight tags, 1.3 mm from the pose fitted to the far tags alone.
+
 **Latency, from a moving tag.** On the same 120 Hz monitor a tag slid back and forth at a known speed, timed by the
 browser's clock synced to the Pi's over Wi-Fi (to within 7-9 ms). Where the tag was in each frame says when the frame
 was taken. Against the service's frame times that came out at 120 and 121 ms in the 360-degree mode (the tag at two

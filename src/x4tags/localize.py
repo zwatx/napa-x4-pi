@@ -88,7 +88,8 @@ class FieldLocalizer:
 
     ``min_tags``: fewer tags give no pose. One tag's pose has two nearly equally good solutions, metres apart, that
     its fit error can't tell apart, so the default is 2.
-    ``max_rms_px``: a pose is accepted only if every tag's corners fit within this (pixels of the frame). When some
+    ``max_rms_px``: a pose is accepted only if every tag's corners fit within this (pixels of the frame; near the X4's
+    stitch, that many times STITCH_SCALE at most: see there). When some
     don't, the worst-fitting tag is left out first, then (if the rest still don't all fit) each tag in turn, up to 8
     tags; a fit without it is kept if it still has ``min_tags`` tags and all of them fit: one misread or misplaced tag
     can't pull the pose, or hide in it.
@@ -96,6 +97,13 @@ class FieldLocalizer:
     weak, e.g. two small, distant tags in nearly the same direction: these say how much to trust it.
     ``max_xy_std_m``: give no pose when the expected position error is larger than this.
     """
+
+    # The X4 joins its two lenses' pictures along the circle 90 degrees from straight ahead (left, right, up and down
+    # through the sides), and tags near it come out shifted and bent by a few pixels: on a screen 1 m away, 3 px
+    # 3.5 degrees from it and nothing measurable 11.6 degrees away (the lenses see from slightly different places, so
+    # it varies with distance). Corners there count as up to STITCH_SCALE times less certain, back to normal
+    # STITCH_DEG away.
+    STITCH_DEG, STITCH_SCALE = 10.0, 8.0
 
     def __init__(self, layout: FieldLayout, tag_size_m: float, mount: Mount = Mount(), max_rms_px: float = 1.5,
                  min_tags: int = 2, huber_px: float = 1.0, corner_noise_px: float = 0.5, max_xy_std_m: float = 1.0):
@@ -188,6 +196,10 @@ class FieldLocalizer:
         rays = np.concatenate([t.rays for t in tags])
         rays = rays / np.linalg.norm(rays, axis=1, keepdims=True)
         bases = tangent_bases(rays)[:, :2]  # (4n, 2, 3): directions across each observed ray
+        # Corners near the stitch count as less certain: residuals there are divided by this, in the fit, in each
+        # tag's fit check and in the covariance alike.
+        off = np.degrees(np.arcsin(np.abs(rays[:, 2])))  # angle from the stitch circle, 90 degrees from ahead
+        bases = bases / (1 + (self.STITCH_SCALE - 1) * np.clip(1 - off / self.STITCH_DEG, 0, None))[:, None, None]
         best = None
         for start in self._starts(tags):
             fit = self._refine(start, points, rays, bases)

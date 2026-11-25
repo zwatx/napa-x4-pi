@@ -206,3 +206,29 @@ def test_gyro_std_devs_turn_into_robot_axes():
     p = pose(45)
     np.testing.assert_allclose(field_pose_values(p)[22:26], np.ravel(cov))
     assert np.isnan(field_pose_values(p)[13:22]).all()  # no robot covariance given
+
+
+def test_a_tag_on_the_stitch_is_trusted_less_not_thrown_out():
+    """The X4's stitch (90 degrees from straight ahead) shifts tags by a few px; one there still counts, at a lower
+    weight, where the same shift anywhere else gets it left out."""
+    import dataclasses
+
+    layout, mount, p_r, tags = _scene((2.4, 1.7), 30.0)
+    tags = sorted(tags, key=lambda t: t.tag_id)[:5]
+
+    def turned(t, deg):  # every corner turned about the camera's vertical axis
+        a = np.radians(deg)
+        r = np.array([[np.cos(a), 0, np.sin(a)], [0, 1, 0], [-np.sin(a), 0, np.cos(a)]])
+        return dataclasses.replace(t, rays=t.rays @ r.T)
+
+    for on_stitch in (True, False):
+        az = np.degrees(np.arctan2(*tags[2].center_ray[[0, 2]]))
+        whole = 90.0 - az if on_stitch else 0.0  # turn the camera's view so tag 2 sits on the stitch (or not)
+        seen = [turned(t, whole) for t in tags]
+        if not on_stitch:
+            assert abs(abs(az) - 90) > 15  # (it isn't there to begin with)
+        seen[2] = turned(seen[2], 0.4)  # ~3 px off
+        loc = FieldLocalizer(layout, SIZE, Mount(z_m=0.55))
+        pose = loc.solve(seen)
+        assert pose is not None
+        assert (tags[2].tag_id in pose.tag_ids) == on_stitch
