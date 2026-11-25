@@ -27,6 +27,21 @@ from .dual import DualView
 from .equirect import TangentView, angular_radius, pixel_to_ray, ray_to_pixel, side_bow_px, tangent_basis, unwrap_near
 
 
+# The X4 is two cameras back to back: the front half of its picture (z > 0) is seen from its front lens's centre and
+# the back half from its back lens's, this far ahead of and behind the middle of the body (28 mm apart; sideways
+# offsets fitted at under 0.2 mm). Measured with tags on a screen across the stitch at 0.6 and 1 m: taking one centre
+# for both halves left 6-13 px between them there, about 4 px at 3 m.
+LENS_OFFSET_M = 0.014
+
+
+def lens_centre(rays) -> np.ndarray:
+    """(..., 3) where in the camera frame the lens that sees each ray is (by the half of the picture it's in)."""
+    rays = np.asarray(rays, float)
+    out = np.zeros(rays.shape)
+    out[..., 2] = np.where(rays[..., 2] >= 0, LENS_OFFSET_M, -LENS_OFFSET_M)
+    return out
+
+
 _PHI = (1 + 5 ** 0.5) / 2
 _ICOSAHEDRON = ([(0, a, b * _PHI) for a in (1, -1) for b in (1, -1)]
                 + [(a, b * _PHI, 0) for a in (1, -1) for b in (1, -1)]
@@ -315,7 +330,8 @@ class X4TagDetector:
         """Tag pose in the camera frame (x right, y down, z forward), from a pinhole view centred on the tag.
 
         Returns (R 3x3, t 3, worst corner reprojection error in pixels at the frame's scale) for the lower-error IPPE
-        solution, or None. t is the tag's centre. The error is in pixels of ``px_per_rad`` (default: the equirect
+        solution, or None. t is the tag's centre from the middle of the camera body (the pose is found from the centre
+        of the lens that sees the tag, ``lens_centre``, and moved by it). The error is in pixels of ``px_per_rad`` (default: the equirect
         frame's, ``frame_height / pi``). R's columns are the tag's axes in the camera frame, with OpenCV's
         square corners for NAPA's corner order (corner 0 is the printed bottom-right of ``napa_vision.tags.tag_image``):
         x towards the printed left edge, y towards the printed bottom, z out of the printed face. A tag seen nearly
@@ -339,7 +355,8 @@ class X4TagDetector:
         if best is None:
             return None
         scale = frame_height / np.pi if px_per_rad is None else px_per_rad
-        return best[0], best[1], best[2] * scale  # normalized units -> pixels at the frame's scale
+        # normalized units -> pixels at the frame's scale
+        return best[0], best[1] + lens_centre(tag.center_ray), best[2] * scale
 
 
 def _seen(tag: X4Tag, found: list[X4Tag], within_deg: float) -> bool:

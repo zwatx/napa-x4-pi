@@ -6,6 +6,7 @@ from napa_vision import NapaDetector
 from synth import add_tag, blank, to_u8, worst_corner_error
 
 from x4tags import X4TagDetector
+from x4tags.detector import lens_centre
 
 
 def frame_with(*specs):
@@ -82,7 +83,8 @@ def test_corner_order_and_pose_axes_follow_the_printed_tag():
 def test_centre_ray_is_the_true_centre_for_a_close_turned_tag():
     img, truth = frame_with((30, dict(lon_deg=25, lat_deg=10, distance_m=0.4, turn_deg=55, tilt_deg=30)))
     tag = by_id(X4TagDetector().detect(img))[30]
-    centre = truth[30][1] / np.linalg.norm(truth[30][1])
+    centre = truth[30][1] - lens_centre(truth[30][1])  # as the lens sees it
+    centre /= np.linalg.norm(centre)
     mean = tag.rays.sum(0) / np.linalg.norm(tag.rays.sum(0))
     assert np.degrees(np.arccos(np.clip(tag.center_ray @ centre, -1, 1))) < 0.1
     assert np.degrees(np.arccos(np.clip(mean @ centre, -1, 1))) > 0.3  # what the corner mean would have been

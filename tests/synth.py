@@ -1,7 +1,8 @@
 """Tiny renderer for tests: real tag36h11 tags as flat squares in 3D, seen by a 2:1 equirectangular camera.
 
 Each pixel is the average of ss x ss rays (antialiasing); the truth corners are the black square's corners
-projected exactly, in the same pixel convention as x4tags.equirect.
+projected exactly, in the same pixel convention as x4tags.equirect. Like the X4, the camera is two lenses back to back:
+each tag is seen from the centre of the lens whose half of the picture its centre is in (``x4tags.detector``).
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import math
 import numpy as np
 from napa_vision.tags import tag_image
 
+from x4tags.detector import lens_centre
 from x4tags.equirect import pixel_to_ray, ray_to_pixel, tangent_basis, unwrap_near
 
 W, H = 2880, 1440
@@ -32,14 +34,16 @@ def _rot(axis, angle):
 def add_tag(img: np.ndarray, tag_id: int, lon_deg: float, lat_deg: float, distance_m: float, size_m: float = 0.1651,
             turn_deg: float = 0.0, tilt_deg: float = 0.0, roll_deg: float = 0.0, ss: int = 4):
     """Draw a tag facing the camera (then turned about its vertical axis, tilted about its horizontal one and
-    rolled about its normal) whose centre is ``distance_m`` away towards (lon, lat). Returns (truth corners (4, 2),
-    centre point in camera coordinates)."""
+    rolled about its normal) whose centre is ``distance_m`` away towards (lon, lat), from the lens that sees it (so it
+    appears exactly there in the picture). Returns (truth corners (4, 2), centre point in camera coordinates, from the
+    middle of the body)."""
     lon, lat = math.radians(lon_deg), math.radians(lat_deg)
     d = np.array([math.cos(lat) * math.sin(lon), -math.sin(lat), math.cos(lat) * math.cos(lon)])
     right, down, fwd = tangent_basis(d)
     r = _rot(fwd, math.radians(roll_deg)) @ _rot(right, math.radians(tilt_deg)) @ _rot(down, math.radians(turn_deg))
     ex, ey = r @ right, r @ down  # the printed pattern's right and down (it faces the camera before turning)
-    return add_tag_at(img, tag_id, d * distance_m, ex, ey, size_m, ss), d * distance_m
+    centre = d * distance_m + lens_centre(d)
+    return add_tag_at(img, tag_id, centre, ex, ey, size_m, ss), centre
 
 
 def add_tag_at(img: np.ndarray, tag_id: int, centre: np.ndarray, ex: np.ndarray, ey: np.ndarray,
@@ -48,6 +52,7 @@ def add_tag_at(img: np.ndarray, tag_id: int, centre: np.ndarray, ex: np.ndarray,
     down along unit vectors ``ex`` and ``ey``. Returns the truth corners (4, 2): printed TL, TR, BR, BL."""
     height, width = img.shape
     centre, ex, ey = (np.asarray(v, float) for v in (centre, ex, ey))
+    centre = centre - lens_centre(centre)  # from the lens that sees it
     n = np.cross(ex, ey)
     cell = size_m / 8
     pattern = tag_image(tag_id, cell_px=1, quiet_zone_cells=1).astype(float)  # 10 x 10 cells incl. white margin

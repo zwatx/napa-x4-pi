@@ -8,6 +8,7 @@ from synth import add_tag_at, blank, to_u8
 
 from x4tags import X4TagDetector
 from x4tags.field import FieldLayout, matrix_to_rpy, quaternion_to_matrix, matrix_to_quaternion
+from x4tags.detector import lens_centre
 from x4tags.localize import FieldLocalizer, robot_position_from_heading
 from x4tags.mount import Mount, rotation_rpy
 
@@ -137,6 +138,7 @@ def _noisy_tags(layout, r_fc, c, sigma_px, rng, max_m=6.0):
         if tag.rotation[:, 0] @ to_cam <= 0.3 * np.linalg.norm(to_cam) or np.linalg.norm(to_cam) > max_m:
             continue
         v = (tag.corners(SIZE) - c) @ r_fc
+        v = v - lens_centre(v.mean(0))  # from the lens that sees it
         u = v / np.linalg.norm(v, axis=1, keepdims=True)
         u = u + np.einsum("kij,ki->kj", tangent_bases(u)[:, :2], rng.normal(0, sigma_px * np.pi / 1440, (4, 2)))
         out.append(X4Tag(tag.tag_id, np.zeros((4, 2)), u / np.linalg.norm(u, axis=1, keepdims=True), 0, 100.0, 0.0,
@@ -232,3 +234,22 @@ def test_a_tag_on_the_stitch_is_trusted_less_not_thrown_out():
         pose = loc.solve(seen)
         assert pose is not None
         assert (tags[2].tag_id in pose.tag_ids) == on_stitch
+
+
+def test_each_half_of_the_picture_is_seen_from_its_own_lens(monkeypatch):
+    """Tags all around a camera 1 m from the nearest: with each half from its own lens centre (28 mm apart) the pose
+    comes out right; taken from one centre, the halves disagree by several px."""
+    import x4tags.detector as detector
+
+    layout = FieldLayout.from_dict(room_layout())
+    mount = Mount(z_m=0.5)
+    r_fr = rotation_rpy(0, 0, math.radians(20))
+    r_fc, c = r_fr @ mount.rotation, np.array([1.0, 1.1, 0.0]) + r_fr @ mount.translation
+    tags = _noisy_tags(layout, r_fc, c, 0.0, np.random.default_rng(0), max_m=3.0)
+    halves = {bool(t.center_ray[2] > 0) for t in tags}
+    assert halves == {True, False} and len(tags) >= 5
+    pose = FieldLocalizer(layout, SIZE, mount, max_rms_px=0.1).solve(tags)
+    assert pose is not None and np.linalg.norm(pose.camera_position - c) < 1e-4
+    monkeypatch.setattr(detector, "LENS_OFFSET_M", 0.0)
+    one_centre = FieldLocalizer(layout, SIZE, mount, max_rms_px=99).solve(tags)
+    assert one_centre.rms_px > 1.0

@@ -19,7 +19,7 @@ import numpy as np
 from napa_vision import PoseWithCovariance
 from napa_vision.covariance import cap_correlations
 
-from .detector import X4Tag, X4TagDetector
+from .detector import X4Tag, X4TagDetector, lens_centre
 from .equirect import tangent_bases
 from .field import OPENCV_TAG_TO_WPILIB_TAG, FieldLayout, matrix_to_rpy
 from .mount import Mount, rotation_rpy
@@ -200,9 +200,10 @@ class FieldLocalizer:
         # tag's fit check and in the covariance alike.
         off = np.degrees(np.arcsin(np.abs(rays[:, 2])))  # angle from the stitch circle, 90 degrees from ahead
         bases = bases / (1 + (self.STITCH_SCALE - 1) * np.clip(1 - off / self.STITCH_DEG, 0, None))[:, None, None]
+        lens = lens_centre(rays)  # each corner is seen from its half's lens (camera frame)
         best = None
         for start in self._starts(tags):
-            fit = self._refine(start, points, rays, bases)
+            fit = self._refine(start, points, rays, bases, lens)
             if fit is not None and (best is None or fit[2] < best[2]):
                 best = fit
             if best is not None and best[2] * self.px_per_rad < 1.0:
@@ -212,10 +213,10 @@ class FieldLocalizer:
         r, c, rms, res = best
         # Every corner must be seen the way the fit says it is, not from behind (a mirror solution can fit the
         # directions with every one pointing backwards). A fit that fails this still says which tags fit worst.
-        v = (points - c) @ r
+        v = (points - c) @ r - lens
         seen = bool(np.min(np.sum(v / np.linalg.norm(v, axis=1, keepdims=True) * rays, 1)) >= np.cos(np.radians(5.0)))
         per_tag = np.sqrt((res.reshape(len(tags), 4, 2) ** 2).sum(2).mean(1))
-        return r, c, rms, per_tag, self._residuals(r, c, points, rays, bases, jacobian=True)[1], seen
+        return r, c, rms, per_tag, self._residuals(r, c, points, rays, bases, lens, jacobian=True)[1], seen
 
     def _starts(self, tags):
         """Camera poses from each tag's own pose (largest tags first, by angle: the most reliable)."""
@@ -230,27 +231,29 @@ class FieldLocalizer:
             out.append((r_fc, ft.position - r_fc @ pose[1]))
         return out
 
-    def _residuals(self, r, c, points, rays, bases, jacobian=False):
+    def _residuals(self, r, c, points, rays, bases, lens, jacobian=False):
         """Residuals (~ angle across each observed ray, radians, 2 per corner) and optionally their Jacobian with
-        respect to (rotation update w, applied as R @ exp(w), position update)."""
-        v = (points - c) @ r  # field -> camera: R^T (P - c), row-wise
+        respect to (rotation update w, applied as R @ exp(w), position update). ``c`` is the middle of the camera
+        body; each corner is seen from ``lens`` (camera frame) away from it."""
+        q = (points - c) @ r  # field -> camera: R^T (P - c), row-wise
+        v = q - lens
         n = np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-9)
         u = v / n
         res = np.einsum("kij,kj->ki", bases, u - rays).ravel()
         if not jacobian:
             return res
-        # dv/dw = [v]x (R' = R exp(w) => v' = exp(-w) v ~ v - w x v), dv/dc = -R^T; du/dv = (I - u u^T) / |v|
+        # dv/dw = [q]x (R' = R exp(w) => q' = exp(-w) q ~ q - w x q), dv/dc = -R^T; du/dv = (I - u u^T) / |v|
         vx = np.zeros((len(v), 3, 3))
-        vx[:, 0, 1], vx[:, 0, 2], vx[:, 1, 2] = -v[:, 2], v[:, 1], -v[:, 0]
-        vx[:, 1, 0], vx[:, 2, 0], vx[:, 2, 1] = v[:, 2], -v[:, 1], v[:, 0]
+        vx[:, 0, 1], vx[:, 0, 2], vx[:, 1, 2] = -q[:, 2], q[:, 1], -q[:, 0]
+        vx[:, 1, 0], vx[:, 2, 0], vx[:, 2, 1] = q[:, 2], -q[:, 1], q[:, 0]
         dv = np.concatenate([vx, np.broadcast_to(-r.T, (len(v), 3, 3))], axis=2)  # (k, 3, 6)
         du = (np.eye(3) - u[:, :, None] * u[:, None, :]) / n[:, :, None]
         return res, np.einsum("kij,kjl,klm->kim", bases, du, dv).reshape(-1, 6)
 
-    def _refine(self, start, points, rays, bases, iterations: int = 20):
+    def _refine(self, start, points, rays, bases, lens, iterations: int = 20):
         r, c = start
         lam = 1e-3
-        res, jac = self._residuals(r, c, points, rays, bases, jacobian=True)
+        res, jac = self._residuals(r, c, points, rays, bases, lens, jacobian=True)
         cost = self._cost(res)
         for _ in range(iterations):
             w = self._weights(res)
@@ -259,7 +262,7 @@ class FieldLocalizer:
             while True:
                 step = np.linalg.solve(a + lam * np.diag(np.diag(a) + 1e-12), -g)
                 r_new, c_new = r @ _rodrigues(step[:3]), c + step[3:]
-                res_new, jac_new = self._residuals(r_new, c_new, points, rays, bases, jacobian=True)  # usually kept
+                res_new, jac_new = self._residuals(r_new, c_new, points, rays, bases, lens, jacobian=True)  # usually kept
                 cost_new = self._cost(res_new)
                 if cost_new <= cost:
                     r, c, cost, lam, res, jac = r_new, c_new, cost_new, max(lam / 10, 1e-9), res_new, jac_new

@@ -92,6 +92,14 @@ The lenses see from slightly different places, so this varies with distance (1 m
 pose fail outright; now corners near the stitch count as up to 8 times less certain, fading to normal 10 degrees
 away, and the pose used all eight tags, 1.3 mm from the pose fitted to the far tags alone.
 
+**Two lenses, two centres.** With the tags across the stitch (on a denser grid, 21 tags), the two halves of the
+picture disagreed by 11-13 px at 1 m and about 20 px at 0.6 m: the X4's lenses sit back to back, and each half of
+the picture is seen from its own lens's centre, about 28 mm apart (14 mm either side of the body's middle, measured at
+both distances; sideways offsets came out under 0.2 mm). Treated as one centre, tags on both sides of the camera gave
+no field pose at all at those distances, and would be about 4 px apart at 3 m. The field pose and single tags' poses
+now take each corner from its own lens: every frame at 1 m got a pose from all 19 tags in view (0.39 px), and at
+0.6 m, 18 of 20 frames from all 17 (0.57 px). Tag positions are from the middle of the camera body.
+
 **Latency, from a moving tag.** On the same 120 Hz monitor a tag slid back and forth at a known speed, timed by the
 browser's clock synced to the Pi's over Wi-Fi (to within 7-9 ms). Where the tag was in each frame says when the frame
 was taken. Against the service's frame times that came out at 120 and 121 ms in the 360-degree mode (the tag at two
